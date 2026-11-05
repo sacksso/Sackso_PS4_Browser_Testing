@@ -1,0 +1,157 @@
+name: Build PKG
+
+# psbrowser - fase 0 (hello de red + visor de texto). Genera el PKG con el toolchain OpenOrbis en Linux (Ubuntu),
+# reutilizando el mismo esquema que ya funciono en el proyecto de Ren'Py para PS4.
+#
+# INTERRUPTORES (Run workflow):
+#   toolchain_tag  Tag del release de OpenOrbis (latest = el ultimo). Fija una version si una nueva rompe algo.
+#   strict_tls     true = rechazar certificados que la consola no valide (-DPSB_STRICT_TLS). Por defecto false (permisivo,
+#                  solo para diagnostico: el log dice el verifyErr de cada certificado).
+# El eboot ya se compilo y enlazo en local con OpenOrbis v0.5.4 (toolchain-llvm-18); el PKG lo genera este CI.
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolchain_tag:
+        description: 'Tag del release de OpenOrbis (latest = el ultimo)'
+        type: string
+        default: 'latest'
+      strict_tls:
+        description: 'TLS estricto (rechaza certificados no validos)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-pkg
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: '1'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+
+jobs:
+  pkg:
+    name: Toolchain + PKG
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Clonar el repo
+        uses: actions/checkout@v4
+
+      - name: Dependencias (clang, lld, make)
+        run: |
+          mkdir -p logs
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld make zip unzip
+          { clang --version | head -1; ld.lld --version | head -1; } 2>&1 | tee logs/versions.txt
+
+      # PkgTool.Core pide OpenSSL 1.1 y Ubuntu 24.04 solo trae la 3 (mismo apaño que en el proyecto de Ren'Py).
+      - name: Instalar libssl1.1 (para PkgTool.Core)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          ok=0
+          for u in \
+            "http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb" \
+            "http://security.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.24_amd64.deb"; do
+            if wget -q "$u" -O libssl1.1.deb; then ok=1; echo "Descargado: $u"; break; fi
+          done
+          [ "$ok" = 1 ] || { echo "::error::No pude descargar libssl1.1"; exit 1; }
+          sudo dpkg -i libssl1.1.deb
+          echo "CLR_OPENSSL_VERSION_OVERRIDE=1.1" >> "$GITHUB_ENV"
+
+      - name: Descargar el toolchain de OpenOrbis
+        env:
+          TAG: ${{ inputs.toolchain_tag }}
+        run: |
+          set -euo pipefail
+          repo=OpenOrbis/OpenOrbis-PS4-Toolchain
+          if [ "$TAG" = "latest" ]; then ep="repos/$repo/releases/latest"; else ep="repos/$repo/releases/tags/$TAG"; fi
+          gh api "$ep" > logs/release.json
+          tag=$(jq -r .tag_name logs/release.json)
+          echo "Release: $tag"
+          jq -r '.assets[] | "\(.name)\t\(.size)"' logs/release.json | tee logs/assets.txt
+          asset=$(jq -r '[.assets[].name | select(test("linux";"i")) | select(test("\\.(tar\\.gz|tgz|zip)$";"i"))][0] // empty' logs/release.json)
+          if [ -z "$asset" ]; then
+            asset=$(jq -r '[.assets[].name | select(test("\\.(tar\\.gz|tgz|zip)$";"i")) | select(test("windows|macos|win|mac|installer";"i") | not)][0] // empty' logs/release.json)
+          fi
+          [ -n "$asset" ] || { echo "::error::No encontre un asset de toolchain valido. Mira logs/assets.txt"; exit 1; }
+          echo "Asset elegido: $asset"
+          gh release download "$tag" --repo "$repo" --pattern "$asset" --dir dl
+          mkdir -p "$HOME/oo"
+          case "$asset" in
+            *.zip) unzip -q "dl/$asset" -d "$HOME/oo" ;;
+            *)     tar -xf "dl/$asset" -C "$HOME/oo" ;;
+          esac
+          bl=$(find "$HOME/oo" -type d -path '*/bin/linux' | head -1)
+          [ -n "$bl" ] || { echo "::error::No hay bin/linux dentro del asset"; exit 1; }
+          root=$(dirname "$(dirname "$bl")")
+          chmod +x "$root"/bin/linux/* || true
+          echo "OO_PS4_TOOLCHAIN=$root" >> "$GITHUB_ENV"
+          echo "Toolchain en: $root"
+
+      - name: Compilar (EBOOT + PKG)
+        env:
+          STRICT: ${{ inputs.strict_tls }}
+        run: |
+          set -euo pipefail
+          # Copia de todo samples/ (el Makefile busca los fuentes en <PROJDIR>/ y los samples esperan _common al lado).
+          copia="$RUNNER_TEMP/samples"
+          rm -rf "$copia"; cp -r "$OO_PS4_TOOLCHAIN/samples" "$copia"
+          proj=psbrowser
+          work="$copia/$proj"
+          mkdir -p "$work/$proj"
+          cp "$copia/SDL2/Makefile" "$work/Makefile"
+          cp -r "$copia/SDL2/sce_sys" "$work/sce_sys"
+          cp -r "$copia/SDL2/sce_module" "$work/sce_module"
+          rm -f "$work/sce_sys/param.sfo"
+          cp "$GITHUB_WORKSPACE"/app/*.cpp "$GITHUB_WORKSPACE"/app/*.h "$work/$proj/"
+          cp -r "$GITHUB_WORKSPACE/third_party" "$work/third_party"   # canvas.h incluye ../third_party/
+          # Identidad propia del PKG (CONTENT_ID = 36 caracteres), sin los .cpp de _common y con las libs de red del sistema.
+          sed -i -E \
+            -e 's/^TITLE +:=.*/TITLE       := PS Browser/' \
+            -e 's/^TITLE_ID +:=.*/TITLE_ID    := PSBR00001/' \
+            -e 's/^CONTENT_ID +:=.*/CONTENT_ID  := IV0000-PSBR00001_00-PSBROWSER0000000/' \
+            -e 's/^COMMONFILES +:=.*/COMMONFILES :=/' \
+            -e 's/^(LIBS +:=.*)$/\1 -lSceNet -lSceSsl -lSceHttp/' \
+            "$work/Makefile"
+          extra=""
+          if [ "$STRICT" = "true" ]; then extra="-DPSB_STRICT_TLS"; fi
+          echo "EXTRAFLAGS='$extra'" | tee logs/flags.txt
+          cd "$work"
+          cat Makefile > "$GITHUB_WORKSPACE/logs/makefile.txt"
+          set +e
+          make EXTRAFLAGS="$extra" 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          find . -name '*.pkg' -exec cp {} "$GITHUB_WORKSPACE/dist/" \;
+          find . -iname 'eboot.bin' -exec cp {} "$GITHUB_WORKSPACE/dist/" \; || true
+          [ "$rc" -eq 0 ] || { echo "::error::make fallo ($rc). Mira logs/build.log"; exit "$rc"; }
+
+      - name: Verificar el PKG (hash)
+        run: |
+          set -euo pipefail
+          cd dist
+          pkg=$(ls *.pkg 2>/dev/null | head -1 || true)
+          [ -n "$pkg" ] || { echo "::error::No se genero ningun .pkg"; exit 1; }
+          sha256sum "$pkg" > "$pkg.sha256"
+          sha256sum -c "$pkg.sha256"
+          { echo '### PKG'; echo '```'; ls -l --block-size=K *.pkg; cat "$pkg.sha256"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: logs
+          if-no-files-found: ignore
+
+      - name: Subir PKG
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: psbrowser-pkg
+          path: dist
+          if-no-files-found: error
