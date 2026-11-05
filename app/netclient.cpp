@@ -114,8 +114,11 @@ static std::string resolveUrl(const std::string& base, const std::string& loc) {
     return dir + loc;
 }
 
-static bool singleGet(const std::string& url, HttpResult& out, size_t maxBody, std::string& redirectTo) {
+// compat=true: conexion sin keep-alive y con cabeceras Accept / Accept-Encoding explicitas (reintento tras un fallo en sendRequest).
+static bool singleGet(const std::string& url, HttpResult& out, size_t maxBody, std::string& redirectTo, bool compat) {
     redirectTo.clear();
+    out.stage.clear();
+    out.sceError = 0;
     int tpl = 0, conn = 0, req = 0;
     bool ok = false;
     auto fail = [&](const char* stage, int code) {
@@ -130,11 +133,15 @@ static bool singleGet(const std::string& url, HttpResult& out, size_t maxBody, s
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpsSetSslCallback(tpl, sslCallback, nullptr);
 
-    conn = sceHttpCreateConnectionWithURL(tpl, url.c_str(), true);
+    conn = sceHttpCreateConnectionWithURL(tpl, url.c_str(), !compat);
     if (conn < 0) { fail("createConnection", conn); conn = 0; goto done; }
     req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, url.c_str(), 0);
     if (req < 0) { fail("createRequest", req); req = 0; goto done; }
 
+    if (compat) {
+        sceHttpAddRequestHeader(req, "Accept", "text/html,*/*;q=0.8", 0);
+        sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 0);
+    }
     {
         int rc = sceHttpSendRequest(req, nullptr, 0);
         if (rc < 0) { fail("sendRequest", rc); goto done; }
@@ -186,7 +193,13 @@ bool http_get(const std::string& url, HttpResult& out, size_t maxBody, int maxRe
         out.finalUrl = cur;
         std::string next;
         psb_log("[http] GET %s", cur.c_str());
-        if (!singleGet(cur, out, maxBody, next)) return false;
+        bool good = singleGet(cur, out, maxBody, next, false);
+        if (!good && out.stage == "sendRequest") {
+            psb_log("[http] reintento en modo compat (sin keep-alive, Accept-Encoding: identity)");
+            good = singleGet(cur, out, maxBody, next, true);
+            psb_log("[http] reintento: %s", good ? "OK" : "FALLO tambien");
+        }
+        if (!good) return false;
         psb_log("[http] -> %d tipo='%s' longitud=%lld cuerpo=%zu bytes", out.status, out.contentType.c_str(),
                 out.contentLength, out.body.size());
         if (next.empty()) return true;

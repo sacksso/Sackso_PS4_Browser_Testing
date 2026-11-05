@@ -43,8 +43,12 @@ static const char* kUrls[] = {
     "http://example.com/",
     "https://example.com/",
     "https://info.cern.ch/",
-    "https://en.wikipedia.org/wiki/PlayStation_4",
+    "https://en.wikipedia.org/wiki/PlayStation_4",   // en la prueba 1 fallo con sendRequest 0x80431073
     "https://www.wikipedia.org/",
+    // Diagnostico del fallo: mismo host con otra pagina, version movil y texto plano (mas pequeno).
+    "https://en.wikipedia.org/wiki/Main_Page",
+    "https://en.m.wikipedia.org/wiki/PlayStation_4",
+    "https://en.wikipedia.org/w/index.php?title=PlayStation_4&action=raw",
 };
 static const int kNumUrls = sizeof(kUrls) / sizeof(kUrls[0]);
 

@@ -42,5 +42,8 @@ docs/           PLAN.md (fases y decisiones), NETSURF.md (ruta a NetSurf), PRUEB
   sample `net_http` hace HTTPS con ellas. Así se evita portar libcurl + una librería TLS para la primera versión.
 - **DNS lo resuelve `sceHttp`:** no depende de `getaddrinfo` de la libc de OpenOrbis (en el port de CPython hubo que
   stubear `sceNetGetDnsInfo`, así que esa vía no está validada).
-- **Certificados:** por defecto el hello acepta cualquier certificado y registra el `verifyErr` (igual que el sample).
-  Con `strict_tls=true` rechaza los que la consola no valide. No uses el modo permisivo para datos sensibles.
+- **Certificados:** en la prueba 1 en PS4 todos los HTTPS dieron `verifyErr=0` (la consola valida los certificados), así que
+  el workflow compila ahora con TLS **estricto** por defecto (`strict_tls=true`). El modo permisivo (acepta todo y solo
+  registra) queda como opción para diagnóstico; no lo uses con datos sensibles.
+- **Prueba 1:** `https://en.wikipedia.org/wiki/PlayStation_4` falló en `sendRequest` (0x80431073) y el resto funcionó.
+  La versión 0.1.1 reintenta en modo compat y añade URLs de diagnóstico (ver `docs/PRUEBAS.md`).

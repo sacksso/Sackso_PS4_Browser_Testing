@@ -21,3 +21,13 @@
 | `createConnection` / `sendRequest` con error | DNS, conectividad o TLS | Mirar `[tls]` y el código 0x8043xxxx |
 | HTTPS falla pero HTTP va | Certificados | Probar con el modo permisivo (por defecto) y revisar `verifyErr` |
 | Pantalla negra | Render/SDL | Mirar `SDL_Init...` y `sin renderer` en el log |
+
+## Prueba 2 (v0.1.1): diagnosticar `0x80431073`
+
+En la prueba 1 solo falló `https://en.wikipedia.org/wiki/PlayStation_4` (en `sendRequest`, tras aceptar el TLS); `https://www.wikipedia.org/`
+funcionó (122 KB). Esta versión:
+- reintenta una vez en modo compat (sin keep-alive y con `Accept` / `Accept-Encoding: identity`) y lo anota en el log;
+- añade tres URLs: `en.wikipedia.org/wiki/Main_Page`, la versión móvil `en.m.wikipedia.org` y la misma página en texto plano (`action=raw`).
+
+Qué miro en el log: si el reintento (`[http] reintento: OK`) arregla la página, si falla solo la grande o todas las de `en.wikipedia.org`,
+y el `verifyErr` en modo estricto (debería seguir en 0).
