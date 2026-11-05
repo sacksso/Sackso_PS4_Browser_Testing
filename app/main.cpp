@@ -49,6 +49,7 @@ static const char* kUrls[] = {
     "https://en.wikipedia.org/wiki/Main_Page",
     "https://en.m.wikipedia.org/wiki/PlayStation_4",
     "https://en.wikipedia.org/w/index.php?title=PlayStation_4&action=raw",
+    "https://news.ycombinator.com/",
 };
 static const int kNumUrls = sizeof(kUrls) / sizeof(kUrls[0]);
 

@@ -46,4 +46,4 @@ docs/           PLAN.md (fases y decisiones), NETSURF.md (ruta a NetSurf), PRUEB
   el workflow compila ahora con TLS **estricto** por defecto (`strict_tls=true`). El modo permisivo (acepta todo y solo
   registra) queda como opción para diagnóstico; no lo uses con datos sensibles.
 - **Prueba 1:** `https://en.wikipedia.org/wiki/PlayStation_4` falló en `sendRequest` (0x80431073) y el resto funcionó.
-  La versión 0.1.1 reintenta en modo compat y añade URLs de diagnóstico (ver `docs/PRUEBAS.md`).
+  Las páginas `/wiki/` siguen fallando en la v0.1.1; la v0.1.2 prueba la hipótesis del límite de cabeceras de respuesta (ver `docs/PRUEBAS.md`).

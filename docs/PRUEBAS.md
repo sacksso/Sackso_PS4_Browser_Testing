@@ -31,3 +31,16 @@ funcionó (122 KB). Esta versión:
 
 Qué miro en el log: si el reintento (`[http] reintento: OK`) arregla la página, si falla solo la grande o todas las de `en.wikipedia.org`,
 y el `verifyErr` en modo estricto (debería seguir en 0).
+
+## Prueba 3 (v0.1.2): hipótesis del tamaño de cabeceras
+
+Resultado de la prueba 2: fallan **todas** las páginas `/wiki/...` de `en.wikipedia.org` y `en.m.wikipedia.org` (también con el reintento
+compat); funcionan `www.wikipedia.org` y `en.wikipedia.org/w/index.php?...&action=raw` (173 KB). Con keep-alive, `Accept-Encoding` y TLS ya
+descartados, la diferencia más probable son las **cabeceras de la respuesta** (las páginas de artículo traen muchas y grandes).
+Es una hipótesis, no está confirmada. La v0.1.2:
+- pide a `libSceHttp` un límite de cabeceras de respuesta de 128 KB con `sceHttpSetResponseHeaderMaxSize` y registra su código de retorno;
+- registra las cabeceras de respuesta de cada página que funciona (líneas `[hdr]`), para comparar tamaños y contenido;
+- añade `https://news.ycombinator.com/` como prueba extra.
+
+Qué miro: la línea `sceHttpSetResponseHeaderMaxSize(...) = 0x...` (0 = aceptada), si `/wiki/PlayStation_4` pasa a dar 200 y, si no, el tamaño
+de las cabeceras de las páginas que sí funcionan.

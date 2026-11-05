@@ -17,6 +17,7 @@
 static const int NET_POOL_SIZE = 16 * 1024;
 static const size_t SSL_POOL_SIZE = 300 * 1024;
 static const size_t HTTP_POOL_SIZE = 1024 * 1024;
+static const size_t kHeaderMax = 128 * 1024;  // limite de cabeceras de respuesta que pedimos a libSceHttp
 
 // Por defecto aceptamos cualquier certificado y solo lo registramos (hello de diagnostico).
 // Compilar con -DPSB_STRICT_TLS para aceptar unicamente cuando verifyErr == 0.
@@ -132,6 +133,15 @@ static bool singleGet(const std::string& url, HttpResult& out, size_t maxBody, s
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpsSetSslCallback(tpl, sslCallback, nullptr);
+    // Hipotesis de la prueba 2: las paginas /wiki/ de Wikipedia mandan cabeceras de respuesta grandes y libSceHttp tiene un
+    // limite por defecto pequeno (www.wikipedia.org y action=raw, con menos cabeceras, si funcionan). La cabecera de OpenOrbis
+    // declara esta funcion sin parametros; la firma real es int sceHttpSetResponseHeaderMaxSize(int id, size_t size).
+    {
+        typedef int (*SetHdrMaxFn)(int, size_t);
+        int rc = reinterpret_cast<SetHdrMaxFn>(sceHttpSetResponseHeaderMaxSize)(tpl, kHeaderMax);
+        static bool logged = false;
+        if (!logged) { psb_log("[http] sceHttpSetResponseHeaderMaxSize(%zu) = 0x%08X", kHeaderMax, static_cast<unsigned>(rc)); logged = true; }
+    }
 
     conn = sceHttpCreateConnectionWithURL(tpl, url.c_str(), !compat);
     if (conn < 0) { fail("createConnection", conn); conn = 0; goto done; }
@@ -154,6 +164,11 @@ static bool singleGet(const std::string& url, HttpResult& out, size_t maxBody, s
         size_t hdrLen = 0;
         if (sceHttpGetAllResponseHeaders(req, &hdrs, &hdrLen) >= 0 && hdrs) {
             out.contentType = headerValue(hdrs, hdrLen, "Content-Type");
+            // Registro de las cabeceras (hasta ~1500 bytes, en trozos) para diagnosticar.
+            std::string h(hdrs, hdrLen > 1500 ? 1500 : hdrLen);
+            for (auto& c : h) if (c == '\r') c = ' '; else if (c == '\n') c = '|';
+            psb_log("[http] cabeceras (%zu bytes en total):", hdrLen);
+            for (size_t o = 0; o < h.size(); o += 480) psb_log("[hdr] %s", h.substr(o, 480).c_str());
             if (status >= 300 && status < 400) redirectTo = headerValue(hdrs, hdrLen, "Location");
         }
         int32_t lenType = 0;
