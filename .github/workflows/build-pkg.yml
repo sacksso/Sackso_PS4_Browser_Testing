@@ -5,8 +5,8 @@ name: Build PKG
 #
 # INTERRUPTORES (Run workflow):
 #   toolchain_tag  Tag del release de OpenOrbis (latest = el ultimo). Fija una version si una nueva rompe algo.
-#   strict_tls     true = rechazar certificados que la consola no valide (-DPSB_STRICT_TLS). Por defecto false (permisivo,
-#                  solo para diagnostico: el log dice el verifyErr de cada certificado).
+#   strict_tls     true = rechazar certificados que la consola no valide (-DPSB_STRICT_TLS). Por defecto true (en la prueba 1 de la PS4
+#                  todos los HTTPS dieron verifyErr=0, asi que la consola valida los certificados).
 # El eboot ya se compilo y enlazo en local con OpenOrbis v0.5.4 (toolchain-llvm-18); el PKG lo genera este CI.
 
 on:
@@ -17,9 +17,9 @@ on:
         type: string
         default: 'latest'
       strict_tls:
-        description: 'TLS estricto (rechaza certificados no validos)'
+        description: 'TLS estricto (rechaza certificados no validos). Por defecto true: en la prueba 1 todos los HTTPS dieron verifyErr=0'
         type: boolean
-        default: false
+        default: true
 
 concurrency:
   group: build-pkg
