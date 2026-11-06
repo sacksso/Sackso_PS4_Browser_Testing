@@ -107,6 +107,8 @@ jobs:
           cp -r "$copia/SDL2/sce_module" "$work/sce_module"
           rm -f "$work/sce_sys/param.sfo"
           cp "$GITHUB_WORKSPACE"/app/*.cpp "$GITHUB_WORKSPACE"/app/*.h "$work/$proj/"
+          # Clase Keyboard del sample 'keyboard' (keyboard.h/.cpp), para leer el teclado USB con libSceKeyboard.
+          cp "$copia"/keyboard/keyboard/keyboard.* "$work/$proj/"
           cp -r "$GITHUB_WORKSPACE/third_party" "$work/third_party"   # canvas.h incluye ../third_party/
           # Identidad propia del PKG (CONTENT_ID = 36 caracteres), sin los .cpp de _common y con las libs de red del sistema.
           sed -i -E \
@@ -114,7 +116,7 @@ jobs:
             -e 's/^TITLE_ID +:=.*/TITLE_ID    := PSBR00001/' \
             -e 's/^CONTENT_ID +:=.*/CONTENT_ID  := IV0000-PSBR00001_00-PSBROWSER0000000/' \
             -e 's/^COMMONFILES +:=.*/COMMONFILES :=/' \
-            -e 's/^(LIBS +:=.*)$/\1 -lSceNet -lSceSsl -lSceHttp/' \
+            -e 's/^(LIBS +:=.*)$/\1 -lSceNet -lSceSsl -lSceHttp -lSceKeyboard/' \
             "$work/Makefile"
           extra=""
           if [ "$STRICT" = "true" ]; then extra="-DPSB_STRICT_TLS"; fi
