@@ -87,7 +87,20 @@ void workerMain() {
         ImgResult r;
         r.tabId = job.tabId; r.gen = job.gen; r.idx = job.idx; r.url = job.url; r.boxW = job.boxW; r.boxH = job.boxH;
         HttpResult res;
-        if (http_get(job.url, res, 3 * 1024 * 1024, 4) && res.status == 200 && !res.truncated) {
+        // 429/503 (p. ej. upload.wikimedia.org limita el ritmo): esperar y reintentar hasta 2 veces.
+        bool got = false;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            got = http_get(job.url, res, 3 * 1024 * 1024, 4);
+            if (got && (res.status == 429 || res.status == 503) && attempt < 2) {
+                psb_log("[img] http %d, reintento %d en %d ms: %s", res.status, attempt + 1, 1500 + attempt * 2000, job.url.c_str());
+                sceKernelUsleep((1500 + attempt * 2000) * 1000);
+                while (g_paused.load()) sceKernelUsleep(20 * 1000);
+                continue;
+            }
+            break;
+        }
+        const bool slowHost = job.url.find("wikimedia.org") != std::string::npos;  // ritmo suave con Wikimedia
+        if (got && res.status == 200 && !res.truncated) {
             psb_log("[img] decodificando %zu bytes (%s)", res.body.size(), res.contentType.c_str());
             r.ok = decode(res.body, job.boxW, job.boxH, r.pix, r.pw, r.ph);
             if (r.ok) psb_log("[img] ok %dx%d", r.pw, r.ph);
@@ -95,6 +108,7 @@ void workerMain() {
         } else {
             psb_log("[img] fallo la descarga (http %d, stage %s, trunc=%d): %s", res.status, res.stage.c_str(), res.truncated ? 1 : 0, job.url.c_str());
         }
+        if (slowHost) sceKernelUsleep(250 * 1000);
         std::lock_guard<std::mutex> lk(g_mtx);
         g_results.push_back(std::move(r));
         g_busy--;

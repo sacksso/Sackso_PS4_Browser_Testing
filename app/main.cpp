@@ -1,4 +1,4 @@
-// psbrowser v0.5.1 - "navegador de escritorio" para PS4: pestanas, barra de herramientas con omnibox, tema claro/oscuro,
+// psbrowser v0.5.2 - "navegador de escritorio" para PS4: pestanas, barra de herramientas con omnibox, tema claro/oscuro,
 // fuente TrueType proporcional, scroll suave en pixeles, imagenes (hilo aparte), formularios GET, anclas y configuracion.
 //
 // Teclado USB: Ctrl+T pestana nueva, Ctrl+W cerrar, Ctrl+RePag/AvPag o Ctrl+Tab cambiar; F6 o Ctrl+L = barra de direcciones;
@@ -1186,7 +1186,7 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.5.1 ==");
+    psb_log("== psbrowser v0.5.2 ==");
     configLoad();
     bookmarksLoad();
     g_th = g_cfg.dark ? themeDark() : themeLight();

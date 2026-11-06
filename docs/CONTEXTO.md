@@ -1,7 +1,7 @@
 # Contexto del proyecto psbrowser (para continuar en otro chat o con otra IA)
 
 > Pega este documento al inicio de una conversación nueva junto con el zip del repo (y, si los tienes, el último `log.txt` y el zip `logs` del CI). Idioma de trabajo: **español**.
-> Última actualización: 6 de noviembre de 2026 (v0.5.1 compilable en PC con stubs; **v0.5.0 probada en PS4 real**).
+> Última actualización: 6 de noviembre de 2026 (**v0.5.1 probada en PS4**; v0.5.2 = v0.5.1 + reintento ante 429, sin probar).
 
 ## 1. Qué es
 Navegador homebrew para **PS4 con GoldHEN**, hecho con el toolchain **OpenOrbis** (LLVM, `x86_64-pc-freebsd12-elf`).
@@ -26,7 +26,8 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 | 0.4.0 | Rediseño de escritorio (TTF, tema, pestañas, scroll suave, imágenes, formularios GET) | Se colgó en Wikipedia (GIF/hilo) |
 | 0.4.1 | Arreglo del cuelgue (GIF desactivado, pausa/cancelación del hilo de imágenes) | Probada: bien, pero ~10 fps |
 | **0.5.0** | 0.4.1 + **`-O2` en el CI** + **teclado en pantalla** con el mando (`osk.*`) | **Probada en PS4: "el teclado funciona excelente, el rendimiento se siente excelente"** |
-| **0.5.1** | 0.5.0 + gzip/deflate, charsets ISO-8859-1/Windows-1252, POST real, cabeceras Accept*, inventario del toolchain en el CI | **Sin probar en consola.** Es el siguiente PKG a instalar |
+| 0.5.1 | 0.5.0 + gzip/deflate, charsets ISO-8859-1/Windows-1252, POST real, cabeceras Accept*, inventario del toolchain en el CI | **Probada en PS4:** compila y arranca; POST funciona; el sistema ya descomprime gzip |
+| **0.5.2** | 0.5.1 + reintento con espera ante HTTP 429/503 en imágenes (Wikimedia) y ritmo suave con `wikimedia.org` | **Sin probar.** Es el siguiente PKG a instalar |
 
 ## 4. Resultados de las pruebas en PS4 real
 ### Prueba v0.5.0 (log de 1092 líneas)
@@ -39,6 +40,16 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 - `config.txt`: `mouseSens=3.50 mouseAccel=1 wheelInvert=0 wheelStep=3 home=`. Marcador: Kintsugi (es.wikipedia).
 - Toolchain del CI: clang/lld 18.1.3; **v0.4.1 compilaba sin ninguna optimización** (solo `-DPSB_STRICT_TLS`); ahora `EXTRAFLAGS='-O2 -DPSB_STRICT_TLS'`.
 
+### Prueba v0.5.1 (log de 2539 líneas)
+- **POST real funciona:** `[form] POST https://html.duckduckgo.com/html/` → HTTP 200 y página normal.
+- **gzip:** con `Accept-Encoding: gzip, deflate`, el servidor responde `Content-Encoding: gzip` pero el cuerpo **ya llega descomprimido**: `sceHttp` descomprime solo. `inflate.cpp` queda como red de seguridad (solo actúa si el cuerpo trae la marca `1f 8b`). Es decir: se ahorra ancho de banda sin trabajo propio.
+- **HTTP 429 de upload.wikimedia.org** en 8 imágenes de en.wikipedia.org/wiki/Real_Madrid_CF (peticiones seguidas desde el hilo de imágenes). Arreglo en 0.5.2: reintentar hasta 2 veces con espera (1,5 s y 3,5 s) y 250 ms entre imágenes de wikimedia. (No se parsea `Retry-After`.)
+- **Páginas probadas:** en/es.wikipedia (hasta 1,7 MB, 3004 enlaces), DuckDuckGo, xda-developers.com (965 KB, 378 líneas, 59 imágenes; la categoría también), **platinmods.com** (XenForo detrás de Cloudflare: carga, 469 líneas, 25 imágenes) y `/whats-new/posts/`. Cargan el contenido pero **sin el diseño real** (no hay CSS).
+- **xdaforums.com/** devolvió 200 con 119 511 bytes pero **0 líneas, 0 enlaces, alto 24 px** (página en blanco). Causa sin diagnosticar (¿cascarón de JavaScript, contenido en `<noscript>`/`<template>`, o el parser descarta todo?). Pendiente: pedir `last.html` justo después de abrir esa URL. `last_1.html` que subió el usuario era Hacker News, no XDA.
+- **Reddit no se probó directamente.** Búsqueda web (nov 2026): Reddit exige iniciar sesión para `old.reddit.com` desde julio de 2026, lo limita a cuentas activas en los últimos 6 meses, y a finales de octubre anunció migrar a una experiencia "principalmente con sesión" y retirar RSS/API pública; la portada logged-out seguirá abierta, el resto de reddit.com sin sesión es JS pesado. Conclusión: Reddit solo es viable con navegador real (ver §7, fidelidad visual).
+- **Toolchain (inventario del CI):** existen `libSceAvPlayer.so`, `libSceAvPlayerStreaming.so`, `libSceVideodec*.so`, `libSceVdec*.so`, `libSceAudioOut.so`, `libSceImeDialog.so`, y las cabeceras `orbis/AvPlayer.h`, `AvPlayerStreaming.h`, `Videodec.h`, `Videodec2.h`, `AudioOut.h`, `ImeDialog.h`, `Ime.h`. Samples: `SDL2, audio-wav, dialogs, font, graphics, input, keyboard, net_http, networking, pngdec, system, threading…` (ningún sample de vídeo). `Http.h` confirma `sceHttpCreateRequestWithURL(int32_t connId, int32_t method, const char* url, uint64_t contentLength)` y `sceHttpSendRequest(int32_t, const void*, size_t)` (el POST con `decltype` compiló).
+- **Botones del mando:** aparece el **11** (41 veces, siempre pegado a otra pulsación; sin función asignada, inofensivo) y el 19. Los botones 8/9 siguen sin verse en ningún log: la barra de direcciones por mando no se ha podido confirmar (el usuario navega con el buscador de DuckDuckGo y marcadores).
+
 ## 5. Hallazgos técnicos (probados en PS4 salvo que se diga)
 - **Red/TLS con el sistema:** `sceHttp`/`sceSsl` funcionan: DNS, HTTP, HTTPS, chunked, redirecciones (manuales leyendo `Location`). Pools: net 16 KB, ssl 300 KB, http 1 MB. Módulos NET, HTTP, SSL vía `sceSysmoduleLoadModuleInternal`. Certificados reales validados (`verifyErr=0`) → TLS estricto por defecto (`-DPSB_STRICT_TLS`).
 - `sceHttpSetResponseHeaderMaxSize(tpl, 128*1024)` evita `sendRequest 0x80431073` en Wikipedia.
@@ -50,7 +61,7 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 - libc++ del toolchain: `std::sqrt(float)` devuelve `double` y rompe `std::min(1.f, ...)` → en `canvas.h` se usa `sqrtf`.
 - **Sin verificar aún:** `libSceAvPlayer` (vídeo), `sceImeDialog` (teclado del sistema), `scePthreadAttrSetstacksize`/`pthread_attr_setstacksize` para hilos con pila grande (no se sabe si enlazan con los stubs de OpenOrbis).
 
-- **gzip:** `sceHttp` NO descomprime solo (hipótesis no confirmada); v0.5.1 pide `Accept-Encoding: gzip, deflate`, descomprime con `inflate.cpp` y, si falla, reintenta en modo compat (`identity`). Revisar en el log las líneas `[http] Content-Encoding=...`.
+- **gzip:** `sceHttp` descomprime solo (confirmado en la prueba v0.5.1). `inflate.cpp` es una red de seguridad.
 
 ## 6. Arquitectura (base v0.4.1; cambios de 0.5.x al final de la sección)
 - `main.cpp` (~1300 líneas): pestañas (`std::vector<Browser*> g_tabs; g_cur; #define B (*g_tabs[g_cur])`), barra de herramientas (atrás/adelante/recargar/inicio, omnibox con candado, estrella de marcadores, menú), scroll suave (`scrollTarget` → `scrollY` con suavizado exponencial), scrollbar arrastrable, foco con Tab/cruceta sobre `doc.focus`, envío de formularios GET (POST se envía como GET con aviso), anclas `#id`, `about:home`/`about:settings`/`about:bookmarks`, `<meta refresh>`, página "vídeo no soportado" para `.mp4/.webm/.m3u8`, re-maquetado al cambiar zoom/ancho, caché global de imágenes (~40 MB), log de rendimiento de los primeros 40 frames (`[perf]`). Clic central: enlace en pestaña nueva / cerrar pestaña. Atajos: Ctrl+T/W/PgUp/PgDn, F5, F6.
@@ -74,9 +85,13 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 2. **Compatibilidad con páginas (sin JS)** — en curso:
    - Hecho en 0.5.1 (sin probar): gzip/deflate, charsets latinos, POST, cabeceras `Accept`.
    - Siguiente: **cookies** básicas (jar en memoria por dominio, `Set-Cookie`/`Cookie`; con `sceHttp` hay que leer `Set-Cookie` de `GetAllResponseHeaders` y añadir `Cookie` a mano); **SVG** (nanosvg header-only: que el CI lo descargue con `curl` fijando versión, y compilar con `-DPSB_NO_SVG` si falla la descarga); **WebP** (libwebp); **GIF** (reactivar cuando haya hilo con pila grande o parchear la recursión de stb); **CSS básico** (colores de fondo, `text-align`, anchos, `display`, `<style>` simple); tablas reales; User-Agent configurable en `config.txt` (`ua=`); `multipart/form-data`; `<select>` visible; favicons `.ico`.
-3. **Vídeo (riesgo alto).** Primero leer `logs/toolchain_inventory.txt` del CI para saber si el toolchain trae `libSceAvPlayer`/cabeceras. Luego un PKG de prueba aparte que abra un `.mp4` directo (H.264/AAC) con `libSceAvPlayer`, registrando cada paso en el log. Se desconoce si convive con el render por software de SDL y cómo obtener los fotogramas. Si funciona, los enlaces `[video]` ya detectados lo abrirían. YouTube sin JS solo vía instancias Invidious/Piped (inestables). Alternativa: servidor intermedio que transcodifique.
-4. **Sitios con mucho JavaScript:** servidor intermedio en PC/móvil del usuario. Proyecto aparte.
-5. Descargas, caché en disco, historial persistente; NetSurf a largo plazo.
+3. **Vídeo (riesgo alto).** El toolchain **sí trae** `libSceAvPlayer` y su cabecera `orbis/AvPlayer.h` (ver §4). Siguiente: un PKG de prueba aparte que abra un `.mp4` directo (H.264/AAC) con `libSceAvPlayer`, registrando cada paso en el log. Se desconoce si convive con el render por software de SDL y cómo obtener los fotogramas. Si funciona, los enlaces `[video]` ya detectados lo abrirían. YouTube sin JS solo vía instancias Invidious/Piped (inestables). Alternativa: servidor intermedio que transcodifique.
+4. **Fidelidad visual de sitios modernos (XDA, Platinmods, Reddit…): decisión pendiente entre tres caminos** (pueden combinarse):
+   - **A. "CSS lite" propio:** descargar las hojas `<link rel=stylesheet>`/`<style>` y soportar un subconjunto (selectores simples, colores/fondos, tamaños, márgenes/padding, bordes, `text-align`, `display`, flex en fila sencillo). Mejora mucho sitios renderizados en servidor (Platinmods/XenForo, artículos de XDA) pero nunca será fiel; sin JS. Iterable en PC con `tools/render_host.cpp` si el usuario aporta HTML+CSS guardados.
+   - **B. Portar NetSurf** (libcss + layout reales, sin JS): mejor fidelidad CSS 2.1, gran esfuerzo y riesgo en OpenOrbis; no probable de compilar sin red/toolchain local.
+   - **C. Servidor de renderizado remoto** (Playwright/Chromium en PC/móvil/VPS del usuario): la PS4 pide `/render?url=…`, recibe teselas PNG de la página real (con JS) más un mapa JSON de zonas clicables/campos, y envía clics/teclas de vuelta. Única vía para Reddit y webs SPA y "como son"; también podría servir vídeo (transcodificado a H.264/MJPEG). Requiere un equipo encendido y conexión; latencia por página. Reutiliza `http_get` (HTTP plano en LAN) y el decodificador PNG/JPEG ya probados. Aún no escrito.
+5. **Sitios con mucho JavaScript:** servidor intermedio en PC/móvil del usuario. Proyecto aparte.
+6. Descargas, caché en disco, historial persistente; NetSurf a largo plazo.
 
 ## 8. Cómo compilar localmente (replicando el CI)
 1. Descargar y descomprimir el toolchain; `export OO_PS4_TOOLCHAIN=<ruta>/OpenOrbis/PS4Toolchain`.
