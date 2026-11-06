@@ -429,6 +429,13 @@ static void pumpImages() {
             if (im.state != 0) continue;
             const std::string u = urlResolve(b.url, im.src);
             if (!urlIsHttp(u)) { im.state = 3; continue; }
+            {   // GIF: de momento no se descarga (el decodificador esta desactivado, ver imgworker.cpp)
+                std::string lu = u;
+                for (char& ch : lu) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                const size_t q = lu.find_first_of("?#");
+                const std::string path = lu.substr(0, q);
+                if (path.size() >= 4 && path.compare(path.size() - 4, 4, ".gif") == 0) { im.state = 3; continue; }
+            }
             auto it = g_imgCache.find(imgKey(u, im.w, im.h));
             if (it != g_imgCache.end()) {
                 im.pw = it->second.pw; im.ph = it->second.ph; im.pix = it->second.pix; im.state = 2;
@@ -469,9 +476,12 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
         return;
     }
     g_loading = true;
+    imgw_cancel();      // las imagenes pendientes de la pagina anterior ya no importan
+    imgw_pause(true);   // y el hilo de imagenes no debe quitarle la red a la navegacion
     present();
     HttpResult res;
     const bool ok = http_get(url, res, 2 * 1024 * 1024);
+    imgw_pause(false);
     g_loading = false;
     if (!ok) {
         char code[64];

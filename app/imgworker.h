@@ -28,3 +28,5 @@ void imgw_start();
 void imgw_submit(const ImgJob& j);
 bool imgw_poll(ImgResult& out);
 int imgw_pending();  // trabajos en cola o en curso
+void imgw_cancel();  // descarta los trabajos en cola (la navegacion cambia de pagina)
+void imgw_pause(bool paused);  // mientras es true el hilo no empieza peticiones nuevas (deja la red libre al hilo principal)

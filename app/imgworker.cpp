@@ -3,6 +3,7 @@
 #include <orbis/libkernel.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <deque>
 #include <mutex>
@@ -17,7 +18,8 @@
 #define STBI_NO_LINEAR
 #define STBI_ONLY_PNG
 #define STBI_ONLY_JPEG
-#define STBI_ONLY_GIF
+// GIF desactivado a proposito: stb_image lo decodifica con una funcion recursiva (hasta ~4000 niveles) y la pila
+// del hilo en la PS4 es pequena. Se reactivara cuando el hilo tenga una pila grande verificada.
 #define STBI_ONLY_BMP
 #define STBI_NO_FAILURE_STRINGS
 #include <stb/stb_image.h>
@@ -29,10 +31,16 @@ std::deque<ImgJob> g_jobs;
 std::deque<ImgResult> g_results;
 int g_busy = 0;
 bool g_started = false;
+std::atomic<bool> g_paused{false};
 
 // Escala (RGBA 8 bits) para que quepa en bw x bh conservando la proporcion: promedio por area al reducir, bilineal al ampliar.
 bool decode(const std::string& bytes, int bw, int bh, std::vector<uint32_t>& out, int& ow, int& oh) {
     int w = 0, h = 0, n = 0;
+    if (!stbi_info_from_memory(reinterpret_cast<const unsigned char*>(bytes.data()), static_cast<int>(bytes.size()), &w, &h, &n)) return false;
+    if (w <= 0 || h <= 0 || static_cast<long long>(w) * h > 12LL * 1000 * 1000) {  // >12 Mpx: no cabe con seguridad en memoria
+        psb_log("[img] imagen demasiado grande (%dx%d), se omite", w, h);
+        return false;
+    }
     unsigned char* d = stbi_load_from_memory(reinterpret_cast<const unsigned char*>(bytes.data()), static_cast<int>(bytes.size()), &w, &h, &n, 4);
     if (!d) return false;
     if (w <= 0 || h <= 0) { stbi_image_free(d); return false; }
@@ -75,11 +83,14 @@ void workerMain() {
             if (!g_jobs.empty()) { job = g_jobs.front(); g_jobs.pop_front(); have = true; g_busy++; }
         }
         if (!have) { sceKernelUsleep(30 * 1000); continue; }
+        while (g_paused.load()) sceKernelUsleep(20 * 1000);  // el hilo principal esta cargando una pagina
         ImgResult r;
         r.tabId = job.tabId; r.gen = job.gen; r.idx = job.idx; r.url = job.url; r.boxW = job.boxW; r.boxH = job.boxH;
         HttpResult res;
         if (http_get(job.url, res, 3 * 1024 * 1024, 4) && res.status == 200 && !res.truncated) {
+            psb_log("[img] decodificando %zu bytes (%s)", res.body.size(), res.contentType.c_str());
             r.ok = decode(res.body, job.boxW, job.boxH, r.pix, r.pw, r.ph);
+            if (r.ok) psb_log("[img] ok %dx%d", r.pw, r.ph);
             if (!r.ok) psb_log("[img] no se pudo decodificar (%s, %zu bytes): %s", res.contentType.c_str(), res.body.size(), job.url.c_str());
         } else {
             psb_log("[img] fallo la descarga (http %d, stage %s, trunc=%d): %s", res.status, res.stage.c_str(), res.truncated ? 1 : 0, job.url.c_str());
@@ -116,3 +127,10 @@ int imgw_pending() {
     std::lock_guard<std::mutex> lk(g_mtx);
     return static_cast<int>(g_jobs.size()) + g_busy;
 }
+
+void imgw_cancel() {
+    std::lock_guard<std::mutex> lk(g_mtx);
+    g_jobs.clear();
+}
+
+void imgw_pause(bool paused) { g_paused.store(paused); }

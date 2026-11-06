@@ -39,6 +39,15 @@ Objetivo a largo plazo: portar NetSurf; plan B: seguir haciendo crecer el visor 
 - **Sin verificar aún:** que `std::thread`/`std::mutex` enlacen y funcionen en OpenOrbis (el sample `threading` existe en el toolchain; usa `sceKernelUsleep` de `orbis/libkernel.h`); que stb_truetype/stb_image compilen con el clang de OpenOrbis (en PC con g++ sí).
 
 
+
+## 5.00 Prueba 6 (v0.4.0 en PS4 real) y correcciones
+- **Funciona:** compila en el CI, arranca, tema/pestañas/barra, info.cern.ch (3 páginas), Wikipedia EN (1,1 MB, 1149 líneas, 20 imágenes) y el hilo de imágenes baja una imagen por TLS.
+- **Rendimiento:** dibujo ~45 ms + subida/presentación ~55 ms por frame = ~10 fps. Pendiente: capa de página en caché y redibujar solo lo que cambia.
+- **Crash en Wikipedia:** el log termina tras descargar `donate.gif` (223 KB), sin ningún log posterior (ni botones). Hipótesis: `stb_image` decodifica GIF con recursión de hasta ~4000 niveles y la pila del hilo (PS4) es pequeña. NO confirmado.
+- **Cuelgue al navegar después:** `http_get` retiene un mutex toda la petición; el hilo de imágenes podía acaparar la red. Corregido con `imgw_cancel()` + `imgw_pause()` en `load()`.
+- **Cambios (sin compilar en esta sesión, sin red):** GIF desactivado (no se descarga ni se decodifica), tope de 12 Mpx por imagen, logs `[img] decodificando/ok`. Si la próxima prueba no se cuelga, la causa era el GIF; si se cuelga, el log dirá en qué imagen.
+- Ratón: `conectado=0` en toda la prueba (no había ratón USB conectado).
+
 ## 5.0 Estado real (6-nov-2026, sesión de recuperación)
 - `app/main.cpp` de v0.4.0 **ya está reescrito** (1292 líneas; pestañas, barra de herramientas, scroll suave, imágenes, formularios GET, anclas). Se recuperó del chat anterior, donde **compiló y enlazó con el toolchain OpenOrbis v0.5.4 (eboot.bin generado)**.
 - Cambios aplicados al recuperar: `url.h/.cpp` con `urlPercentDecode` y `urlUnwrapSearchRedirect`; en `canvas.h` `std::sqrt(` -> `sqrtf(` (el toolchain devolvia double y rompia `std::min(1.f, ...)`); se eliminaron `htmltext.*` (obsoletos).
