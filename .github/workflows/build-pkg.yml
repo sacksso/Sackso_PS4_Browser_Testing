@@ -143,6 +143,23 @@ jobs:
           sha256sum -c "$pkg.sha256"
           { echo '### PKG'; echo '```'; ls -l --block-size=K *.pkg; cat "$pkg.sha256"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Inventario del toolchain (para decidir el soporte de video y otras APIs)
+        if: always()
+        run: |
+          mkdir -p logs
+          tc="${OO_PS4_TOOLCHAIN:-}"
+          {
+            echo "toolchain: $tc"
+            echo "== lib (AvPlayer, video, audio, IME, imagen, fuentes, zlib)"
+            ls "$tc/lib" 2>/dev/null | grep -i -E "avplayer|video|vdec|audio|ime|jpeg|png|webp|zlib|font|png|gif" || echo "(ninguna coincidencia)"
+            echo "== cabeceras"
+            find "$tc/include" \( -iname '*avplayer*' -o -iname '*videodec*' -o -iname '*ime*' -o -iname '*audioout*' -o -iname '*vdec*' \) 2>/dev/null | head -50
+            echo "== Http.h: metodos y firmas usadas"
+            grep -n "ORBIS_METHOD_\|sceHttpSendRequest\|sceHttpCreateRequestWithURL" "$tc/include/orbis/Http.h" 2>/dev/null | head -20
+            echo "== samples"
+            ls "$tc/samples" 2>/dev/null
+          } > logs/toolchain_inventory.txt 2>&1 || true
+
       - name: Subir logs
         if: always()
         uses: actions/upload-artifact@v4
