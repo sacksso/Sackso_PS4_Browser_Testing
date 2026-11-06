@@ -5,7 +5,9 @@ JavaScript moderno). Mientras tanto, el repo avanza por fases pequeñas que se p
 
 > Uso personal / aprendizaje. Reutiliza el toolchain y el CI que ya funcionaron en el proyecto de Ren'Py para PS4.
 
-## Estado: fase 1a (visor con enlaces, barra de URL, historial, teclado y ratón)
+## Estado actual: v0.4.1 (probada en PS4: pestañas, imágenes PNG/JPEG, formularios GET; ver `docs/CONTEXTO.md`)
+
+## Histórico: fase 1a (visor con enlaces, barra de URL, historial, teclado y ratón)
 
 La fase 0 (red + TLS) ya está **probada en una PS4 real** (ver `docs/CONTEXTO.md`). La fase 1a es nueva: compila y enlaza con OpenOrbis, pero **no se ha probado en la consola**.
 

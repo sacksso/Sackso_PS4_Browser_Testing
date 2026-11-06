@@ -1,4 +1,4 @@
-// psbrowser v0.4.0 - "navegador de escritorio" para PS4: pestanas, barra de herramientas con omnibox, tema claro/oscuro,
+// psbrowser v0.5.0 - "navegador de escritorio" para PS4: pestanas, barra de herramientas con omnibox, tema claro/oscuro,
 // fuente TrueType proporcional, scroll suave en pixeles, imagenes (hilo aparte), formularios GET, anclas y configuracion.
 //
 // Teclado USB: Ctrl+T pestana nueva, Ctrl+W cerrar, Ctrl+RePag/AvPag o Ctrl+Tab cambiar; F6 o Ctrl+L = barra de direcciones;
@@ -29,6 +29,7 @@
 #include "keyboard.h"  // copiado por el workflow desde samples/keyboard/keyboard/ de OpenOrbis
 #include "log.h"
 #include "mouse.h"
+#include "osk.h"
 #include "netclient.h"
 #include "pagerender.h"
 #include "textengine.h"
@@ -683,6 +684,10 @@ static void submitForm(Browser& b, int formIdx, int pressedField) {
     if (f.post) toast("Formulario POST: se envia como GET (aun no hay POST)", true);
     navigate(b, query.empty() ? action : action + "?" + query, true);
 }
+// ---- teclado en pantalla (mando) ----
+static Osk g_osk;
+static int g_oskTarget = 0;  // 0 ninguno, 1 barra de direcciones, 2 campo de formulario
+static void oskOpenField(Browser& b, int fieldIdx);
 static void activateFocus(Browser& b, int fi) {
     if (fi < 0 || fi >= static_cast<int>(b.doc.focus.size())) return;
     const Focusable F = b.doc.focus[fi];
@@ -763,6 +768,51 @@ static void startUrlEdit(Browser& b, const std::string& initial, bool fresh) {
     b.urlText = initial;
     b.editField = -1;
     g_dirty = true;
+}
+static void oskOpenField(Browser& b, int fieldIdx) {
+    if (fieldIdx < 0 || fieldIdx >= static_cast<int>(b.doc.fields.size())) return;
+    const FormField& f = b.doc.fields[fieldIdx];
+    osk_open(g_osk, f.placeholder.empty() ? std::string("Escribir en el campo") : f.placeholder, f.value, f.type == "password");
+    g_oskTarget = 2;
+    g_dirty = true;
+}
+static void oskOpenUrl(Browser& b) {
+    startUrlEdit(b, "", true);
+    osk_open(g_osk, "Direccion o busqueda", "", false);
+    g_oskTarget = 1;
+    g_dirty = true;
+}
+static void oskClose() {
+    g_osk.open = false;
+    g_oskTarget = 0;
+    g_dirty = true;
+}
+// Aplica el resultado del teclado al destino (barra o campo).
+static void oskApply(Browser& b, OskResult r) {
+    if (r == OSK_NONE) return;
+    if (r == OSK_CHANGED || r == OSK_SUBMITTED) {
+        if (g_oskTarget == 1) { b.urlText = g_osk.text; b.urlFresh = false; }
+        else if (g_oskTarget == 2 && b.editField >= 0 && b.editField < static_cast<int>(b.doc.fields.size()))
+            b.doc.fields[b.editField].value = g_osk.text;
+    }
+    g_dirty = true;
+    if (r == OSK_SUBMITTED) {
+        const int target = g_oskTarget;
+        oskClose();
+        if (target == 1) {
+            const std::string u = urlFromUserInput(b.urlText);
+            b.urlEdit = false;
+            if (!u.empty()) navigate(b, u, true);
+        } else if (target == 2) {
+            const int form = (b.editField >= 0 && b.editField < static_cast<int>(b.doc.fields.size())) ? b.doc.fields[b.editField].form : -1;
+            b.editField = -1;
+            if (form >= 0) submitForm(b, form, -1);
+        }
+    } else if (r == OSK_CANCELLED) {
+        oskClose();
+        b.urlEdit = false;
+        b.editField = -1;
+    }
 }
 static RenderCtx makeRc(Browser& b) {
     RenderCtx rc{&g_th, 0, VIEW_Y, W - SBAR_W, VIEW_H, contentLeft(), static_cast<int>(b.scrollY + 0.5f)};
@@ -929,6 +979,7 @@ static void drawFrame() {
     drawTabbar(cv, b);
     drawToolbar(cv, b);
     drawBubble(cv, b, SDL_GetTicks());
+    if (g_osk.open) osk_draw(g_osk, cv, th, W, H, g_caret);
 }
 static void renderFrame() {
     SDL_RenderClear(g_ren);
@@ -973,6 +1024,10 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
     static int logged = 0;
     if (logged < 60) { logged++; psb_log("tecla: codigo=%d char=%d mods=0x%x", code, ch, mods); }
     Browser& b = B;
+    if (g_osk.open) {
+        if (code == K_ESC) oskApply(b, OSK_CANCELLED);
+        return;
+    }
     // 1) edicion de la barra de direcciones
     if (b.urlEdit) {
         if (code == K_RETURN) {
@@ -985,7 +1040,7 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
             g_dirty = true;
         } else if (code == K_BACKSPACE) {
             if (b.urlFresh) { b.urlText.clear(); b.urlFresh = false; }
-            else if (!b.urlText.empty()) b.urlText.pop_back();
+            else utf8_pop_back(b.urlText);
             g_dirty = true;
         } else if (ch >= 32 && ch < 127 && !ctrl) {
             if (b.urlFresh) { b.urlText.clear(); b.urlFresh = false; }
@@ -1013,7 +1068,7 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
                     if (b.doc.focus[i].kind == 1 && b.doc.focus[i].ref == nx) { b.sel = static_cast<int>(i); ensureFocusVisible(b); break; }
             g_dirty = true;
         } else if (code == K_BACKSPACE) {
-            if (!f.value.empty()) f.value.pop_back();
+            utf8_pop_back(f.value);
             g_dirty = true;
         } else if (ch >= 32 && ch < 127 && !ctrl) {
             f.value += static_cast<char>(ch);
@@ -1109,7 +1164,7 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.4.0 ==");
+    psb_log("== psbrowser v0.5.0 ==");
     configLoad();
     bookmarksLoad();
     g_th = g_cfg.dark ? themeDark() : themeLight();
@@ -1162,8 +1217,29 @@ int main(int, char**) {
                 case SDL_QUIT: running = false; break;
                 case SDL_JOYBUTTONDOWN:
                     psb_log("boton %d", e.jbutton.button);
+                    if (g_osk.open) {  // el teclado en pantalla captura el mando
+                        OskResult r = OSK_NONE;
+                        switch (e.jbutton.button) {
+                            case 0: r = osk_input(g_osk, OSK_SELECT); break;
+                            case 1: r = osk_input(g_osk, OSK_BACKSPACE); break;
+                            case 2: r = osk_input(g_osk, OSK_SPACE); break;
+                            case 3: r = osk_input(g_osk, OSK_SHIFT); break;
+                            case 4: r = osk_input(g_osk, OSK_CURSOR_L); break;
+                            case 5: r = osk_input(g_osk, OSK_CURSOR_R); break;
+                            case 9: r = OSK_SUBMITTED; break;  // Options = Enter (indice supuesto)
+                            default: break;
+                        }
+                        oskApply(B, r);
+                        break;
+                    }
+                    if (e.jbutton.button == 8 || e.jbutton.button == 9) { oskOpenUrl(B); break; }  // Share/Options (supuesto)
                     switch (e.jbutton.button) {
-                        case 0: if (B.sel >= 0) activateFocus(B, B.sel); break;
+                        case 0:
+                            if (B.sel >= 0) {
+                                activateFocus(B, B.sel);
+                                if (B.editField >= 0) oskOpenField(B, B.editField);
+                            }
+                            break;
                         case 1: goBack(B); break;
                         case 2: reload(B); break;
                         case 3: navigate(B, homeUrl(), true); break;
@@ -1174,13 +1250,23 @@ int main(int, char**) {
                     break;
                 case SDL_JOYHATMOTION:
                     psb_log("hat %d", e.jhat.value);
+                    if (g_osk.open) {
+                        OskResult r = OSK_NONE;
+                        if (e.jhat.value & SDL_HAT_UP) r = osk_input(g_osk, OSK_UP);
+                        if (e.jhat.value & SDL_HAT_DOWN) r = osk_input(g_osk, OSK_DOWN);
+                        if (e.jhat.value & SDL_HAT_LEFT) r = osk_input(g_osk, OSK_LEFT);
+                        if (e.jhat.value & SDL_HAT_RIGHT) r = osk_input(g_osk, OSK_RIGHT);
+                        oskApply(B, r);
+                        g_dirty = true;
+                        break;
+                    }
                     if (e.jhat.value & SDL_HAT_UP) moveFocus(B, -1);
                     if (e.jhat.value & SDL_HAT_DOWN) moveFocus(B, 1);
                     if (e.jhat.value & SDL_HAT_LEFT) goBack(B);
                     if (e.jhat.value & SDL_HAT_RIGHT) goForward(B);
                     break;
                 case SDL_JOYAXISMOTION:
-                    if (e.jaxis.axis == 1 || e.jaxis.axis == 3) padAxis = std::abs(e.jaxis.value) > 6000 ? e.jaxis.value : 0;
+                    if (e.jaxis.axis == 1 || e.jaxis.axis == 3) padAxis = (!g_osk.open && std::abs(e.jaxis.value) > 6000) ? e.jaxis.value : 0;
                     break;
                 default: break;
             }
@@ -1244,15 +1330,15 @@ int main(int, char**) {
                         updateHover(g_mx, g_my);
                     }
                 }
-                if (ms.wheel) {
+                if (ms.wheel && !g_osk.open) {
                     static int wlog = 0;
                     if (wlog < 10) { wlog++; psb_log("rueda: %d", ms.wheel); }
                     scrollBy(B, ((ms.wheel > 0) != g_cfg.wheelInvert ? -1 : 1) * g_cfg.wheelStep * 40);
                 }
                 const uint32_t pressed = ms.buttons & ~prevButtons;
-                if (pressed & 1) mouseLeftPress(dragging, dragOff);
+                if ((pressed & 1) && !g_osk.open) mouseLeftPress(dragging, dragOff);
                 if (!(ms.buttons & 1)) dragging = false;
-                if (pressed & 2) goBack(B);
+                if ((pressed & 2) && !g_osk.open) goBack(B);
                 if (pressed & 4) {  // central: enlace en pestana nueva / cerrar pestana
                     const int ui = uiAt(g_mx, g_my);
                     if (ui >= 0 && g_ui[ui].kind == UI_TAB) closeTab(g_ui[ui].arg);
@@ -1278,7 +1364,7 @@ int main(int, char**) {
         if (now - lastToggle > 500) {
             lastToggle = now;
             g_caret = !g_caret;
-            if (B.urlEdit || B.editField >= 0) g_dirty = true;
+            if (B.urlEdit || B.editField >= 0 || g_osk.open) g_dirty = true;
         }
         if (g_toastUntil && now > g_toastUntil) { g_toastUntil = 0; g_toast.clear(); g_dirty = true; }
         if (now - lastPump > 120) { lastPump = now; pumpImages(); }
