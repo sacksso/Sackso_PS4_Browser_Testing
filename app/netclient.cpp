@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 #include "log.h"
@@ -201,6 +202,8 @@ done:
 }
 
 bool http_get(const std::string& url, HttpResult& out, size_t maxBody, int maxRedirects) {
+    static std::mutex httpMutex;  // libSceHttp se usa desde el hilo principal y el de imagenes: una peticion a la vez
+    std::lock_guard<std::mutex> httpLock(httpMutex);
     out = HttpResult();
     if (!g_ready) { out.stage = "net_init"; return false; }
     std::string cur = url;

@@ -7,4 +7,7 @@ std::string urlStripFragment(const std::string& url);                      // qu
 std::string urlPercentEncode(const std::string& s);                        // para consultas de busqueda
 // Convierte lo escrito en la barra: URL completa, dominio sin esquema o texto de busqueda (DuckDuckGo version HTML).
 std::string urlFromUserInput(const std::string& input);
+std::string urlPercentDecode(const std::string& s);                       // %XX -> byte, '+' -> espacio
+// Si 'url' es un enlace de salida de DuckDuckGo (duckduckgo.com/l/?uddg=...), devuelve el destino real; si no, ''.
+std::string urlUnwrapSearchRedirect(const std::string& url);
 bool urlIsHttp(const std::string& url);                                    // empieza por http:// o https://

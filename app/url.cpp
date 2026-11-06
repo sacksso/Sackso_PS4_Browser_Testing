@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 
 bool urlIsHttp(const std::string& u) { return u.compare(0, 7, "http://") == 0 || u.compare(0, 8, "https://") == 0; }
 
@@ -82,4 +83,35 @@ std::string urlFromUserInput(const std::string& in) {
     bool hasDot = s.find('.') != std::string::npos;
     if (!hasSpace && (hasDot || s.compare(0, 9, "localhost") == 0)) return "https://" + s;
     return "https://html.duckduckgo.com/html/?q=" + urlPercentEncode(s);
+}
+
+std::string urlPercentDecode(const std::string& s) {
+    std::string o;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '%' && i + 2 < s.size() && std::isxdigit(static_cast<unsigned char>(s[i + 1])) &&
+            std::isxdigit(static_cast<unsigned char>(s[i + 2]))) {
+            char hex[3] = {s[i + 1], s[i + 2], 0};
+            o += static_cast<char>(std::strtol(hex, nullptr, 16));
+            i += 2;
+        } else if (s[i] == '+') {
+            o += ' ';
+        } else {
+            o += s[i];
+        }
+    }
+    return o;
+}
+std::string urlUnwrapSearchRedirect(const std::string& url) {
+    size_t schemeEnd = url.find("://");
+    if (schemeEnd == std::string::npos) return std::string();
+    size_t hostEnd = url.find('/', schemeEnd + 3);
+    if (hostEnd == std::string::npos) return std::string();
+    std::string host = url.substr(schemeEnd + 3, hostEnd - schemeEnd - 3);
+    bool ddg = host == "duckduckgo.com" || host == "www.duckduckgo.com" || host == "html.duckduckgo.com" || host == "lite.duckduckgo.com";
+    if (!ddg || url.compare(hostEnd, 3, "/l/") != 0) return std::string();
+    size_t u = url.find("uddg=", hostEnd);
+    if (u == std::string::npos) return std::string();
+    size_t e = url.find('&', u);
+    std::string dec = urlPercentDecode(url.substr(u + 5, e == std::string::npos ? std::string::npos : e - u - 5));
+    return urlIsHttp(dec) ? dec : std::string();
 }
