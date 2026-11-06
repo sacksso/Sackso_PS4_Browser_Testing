@@ -1,4 +1,5 @@
 #include "netclient.h"
+#include "inflate.h"
 
 #include <orbis/Http.h>
 #include <orbis/Net.h>
@@ -117,12 +118,13 @@ static std::string resolveUrl(const std::string& base, const std::string& loc) {
 }
 
 // compat=true: conexion sin keep-alive y con cabeceras Accept / Accept-Encoding explicitas (reintento tras un fallo en sendRequest).
-static bool singleGet(const std::string& url, HttpResult& out, size_t maxBody, std::string& redirectTo, bool compat) {
+static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, std::string& redirectTo, bool compat) {
     redirectTo.clear();
     out.stage.clear();
     out.sceError = 0;
     int tpl = 0, conn = 0, req = 0;
     bool ok = false;
+    std::string encoding;  // Content-Encoding de la respuesta
     auto fail = [&](const char* stage, int code) {
         out.stage = stage;
         out.sceError = code;
@@ -146,15 +148,22 @@ static bool singleGet(const std::string& url, HttpResult& out, size_t maxBody, s
 
     conn = sceHttpCreateConnectionWithURL(tpl, url.c_str(), !compat);
     if (conn < 0) { fail("createConnection", conn); conn = 0; goto done; }
-    req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, url.c_str(), 0);
+    // POST = 1 en el SDK de Sony (SCE_HTTP_METHOD_POST); el cast sirve tanto si ORBIS_METHOD_GET es un entero como un enum.
+    req = sceHttpCreateRequestWithURL(conn, post ? static_cast<decltype(ORBIS_METHOD_GET)>(1) : ORBIS_METHOD_GET, url.c_str(),
+                                      post ? static_cast<uint64_t>(post->body.size()) : 0);
     if (req < 0) { fail("createRequest", req); req = 0; goto done; }
 
     if (compat) {
         sceHttpAddRequestHeader(req, "Accept", "text/html,*/*;q=0.8", 0);
         sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 0);
+    } else {
+        sceHttpAddRequestHeader(req, "Accept", "text/html,application/xhtml+xml,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5", 0);
+        sceHttpAddRequestHeader(req, "Accept-Language", "es-ES,es;q=0.9,en;q=0.7", 0);
+        sceHttpAddRequestHeader(req, "Accept-Encoding", "gzip, deflate", 0);
     }
+    if (post) sceHttpAddRequestHeader(req, "Content-Type", post->contentType.c_str(), 0);
     {
-        int rc = sceHttpSendRequest(req, nullptr, 0);
+        int rc = post ? sceHttpSendRequest(req, post->body.data(), post->body.size()) : sceHttpSendRequest(req, nullptr, 0);
         if (rc < 0) { fail("sendRequest", rc); goto done; }
         int32_t status = 0;
         rc = sceHttpGetStatusCode(req, &status);
@@ -165,6 +174,7 @@ static bool singleGet(const std::string& url, HttpResult& out, size_t maxBody, s
         size_t hdrLen = 0;
         if (sceHttpGetAllResponseHeaders(req, &hdrs, &hdrLen) >= 0 && hdrs) {
             out.contentType = headerValue(hdrs, hdrLen, "Content-Type");
+            encoding = headerValue(hdrs, hdrLen, "Content-Encoding");
             // Registro de las cabeceras (hasta ~1500 bytes, en trozos) para diagnosticar.
             std::string h(hdrs, hdrLen > 1500 ? 1500 : hdrLen);
             for (auto& c : h) if (c == '\r') c = ' '; else if (c == '\n') c = '|';
@@ -192,6 +202,23 @@ static bool singleGet(const std::string& url, HttpResult& out, size_t maxBody, s
             }
             out.body.append(reinterpret_cast<char*>(buf.data()), n);
         }
+        // Cuerpo comprimido: se descomprime aqui. Si el sistema ya lo descomprimio (sin la marca gzip), se deja tal cual.
+        if (!encoding.empty() && out.body.size() > 2) {
+            const bool gz = static_cast<unsigned char>(out.body[0]) == 0x1f && static_cast<unsigned char>(out.body[1]) == 0x8b;
+            std::string e;
+            for (char c : encoding) e += static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c);
+            const bool isGz = e.find("gzip") != std::string::npos, isDef = e.find("deflate") != std::string::npos;
+            if ((isGz && gz) || (isDef && !isGz)) {
+                std::string dec;
+                const int rc = content_decode(isGz ? "gzip" : "deflate", out.body, dec, maxBody);
+                psb_log("[http] Content-Encoding=%s: %zu -> %zu bytes (rc=%d)", e.c_str(), out.body.size(), dec.size(), rc);
+                if (rc == 1) { fail("decode", -1); goto done; }
+                if (rc == 2) out.truncated = true;
+                if (rc == 0 || rc == 2) out.body.swap(dec);
+            } else {
+                psb_log("[http] Content-Encoding=%s pero el cuerpo ya viene sin comprimir", e.c_str());
+            }
+        }
         ok = true;
     }
 done:
@@ -201,7 +228,7 @@ done:
     return ok;
 }
 
-bool http_get(const std::string& url, HttpResult& out, size_t maxBody, int maxRedirects) {
+bool http_request(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, int maxRedirects) {
     static std::mutex httpMutex;  // libSceHttp se usa desde el hilo principal y el de imagenes: una peticion a la vez
     std::lock_guard<std::mutex> httpLock(httpMutex);
     out = HttpResult();
@@ -210,11 +237,11 @@ bool http_get(const std::string& url, HttpResult& out, size_t maxBody, int maxRe
     for (int i = 0; i <= maxRedirects; i++) {
         out.finalUrl = cur;
         std::string next;
-        psb_log("[http] GET %s", cur.c_str());
-        bool good = singleGet(cur, out, maxBody, next, false);
-        if (!good && out.stage == "sendRequest") {
+        psb_log("[http] %s %s", post ? "POST" : "GET", cur.c_str());
+        bool good = singleGet(cur, post, out, maxBody, next, false);
+        if (!good && (out.stage == "sendRequest" || out.stage == "decode")) {
             psb_log("[http] reintento en modo compat (sin keep-alive, Accept-Encoding: identity)");
-            good = singleGet(cur, out, maxBody, next, true);
+            good = singleGet(cur, post, out, maxBody, next, true);
             psb_log("[http] reintento: %s", good ? "OK" : "FALLO tambien");
         }
         if (!good) return false;
@@ -223,7 +250,12 @@ bool http_get(const std::string& url, HttpResult& out, size_t maxBody, int maxRe
         if (next.empty()) return true;
         cur = resolveUrl(cur, next);
         out.redirects++;
+        post = nullptr;  // tras una redireccion se sigue con GET (comportamiento habitual de 301/302/303)
     }
     out.stage = "demasiadas redirecciones";
     return false;
+}
+
+bool http_get(const std::string& url, HttpResult& out, size_t maxBody, int maxRedirects) {
+    return http_request(url, nullptr, out, maxBody, maxRedirects);
 }

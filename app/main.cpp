@@ -1,4 +1,4 @@
-// psbrowser v0.5.0 - "navegador de escritorio" para PS4: pestanas, barra de herramientas con omnibox, tema claro/oscuro,
+// psbrowser v0.5.1 - "navegador de escritorio" para PS4: pestanas, barra de herramientas con omnibox, tema claro/oscuro,
 // fuente TrueType proporcional, scroll suave en pixeles, imagenes (hilo aparte), formularios GET, anclas y configuracion.
 //
 // Teclado USB: Ctrl+T pestana nueva, Ctrl+W cerrar, Ctrl+RePag/AvPag o Ctrl+Tab cambiar; F6 o Ctrl+L = barra de direcciones;
@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 #include "canvas.h"
+#include "charset.h"
 #include "htmldoc.h"
 #include "imgworker.h"
 #include "keyboard.h"  // copiado por el workflow desde samples/keyboard/keyboard/ de OpenOrbis
@@ -232,7 +233,7 @@ static std::string genHome() {
          "<li>Teclado: Ctrl+T nueva pestana, Ctrl+W cerrar, F6 o Ctrl+L direccion, Tab/Enter enlaces y campos, Backspace atras, F5 recargar, F10 configuracion, Ctrl+D marcador, Ctrl +/- zoom.</li>"
          "<li>Raton: clic en enlaces, botones y pestanas; clic central abre en pestana nueva; clic derecho = atras; rueda = desplazar.</li>"
          "<li>Mando: cruceta = foco / atras / adelante; boton 0 activar, 1 atras, 2 recargar, 3 inicio, 4/5 pagina; stick = desplazar.</li>"
-         "</ul><p>Sin JavaScript, sin video/audio y con CSS limitado. Los formularios con POST se envian como GET.</p></body></html>";
+         "</ul><p>Sin JavaScript, sin video/audio y con CSS limitado. Los formularios POST se envian de verdad; no hay cookies ni JavaScript.</p></body></html>";
     return h;
 }
 static std::string genSettings() {
@@ -462,7 +463,13 @@ static void saveLeaving(Browser& b) {
     e.html = std::move(b.html);  // b.html se vuelve a rellenar al cargar la pagina siguiente
     b.html.clear();
 }
+// Cuerpo POST pendiente: lo deja submitForm y lo consume load() una sola vez (recargar o volver usan GET).
+static HttpPost g_post;
+static bool g_hasPost = false;
 static void load(Browser& b, const std::string& urlIn, int depth = 0) {
+    HttpPost post;
+    const bool isPost = g_hasPost;
+    if (isPost) { post = std::move(g_post); g_post = HttpPost(); g_hasPost = false; }
     std::string url = urlIn, frag;
     size_t h = url.find('#');
     if (h != std::string::npos) { frag = url.substr(h + 1); url = url.substr(0, h); }
@@ -481,7 +488,7 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
     imgw_pause(true);   // y el hilo de imagenes no debe quitarle la red a la navegacion
     present();
     HttpResult res;
-    const bool ok = http_get(url, res, 2 * 1024 * 1024);
+    const bool ok = isPost ? http_request(url, &post, res, 2 * 1024 * 1024) : http_get(url, res, 2 * 1024 * 1024);
     imgw_pause(false);
     g_loading = false;
     if (!ok) {
@@ -496,6 +503,11 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
     const size_t bytes = res.body.size();
     const bool truncated = res.truncated;
     const int status = res.status;
+    if (ct.empty() || containsCI(ct, "html") || containsCI(ct, "text/") || containsCI(ct, "xml")) {
+        const std::string cs = charset_detect(ct, res.body.substr(0, 2048));
+        if (charset_to_utf8(res.body, cs)) psb_log("[charset] convertido a UTF-8 (declarado: '%s')", cs.c_str());
+        else if (!cs.empty() && cs != "utf-8" && cs != "utf8") psb_log("[charset] '%s' sin soporte: se muestra tal cual", cs.c_str());
+    }
     if (ct.empty() || containsCI(ct, "html")) setPage(b, finalUrl, std::move(res.body), 0);
     else if (containsCI(ct, "text/") || containsCI(ct, "json") || containsCI(ct, "xml")) setPage(b, finalUrl, std::move(res.body), 1);
     else {
@@ -664,8 +676,10 @@ static void submitForm(Browser& b, int formIdx, int pressedField) {
     const Form& f = b.doc.forms[formIdx];
     std::string action = f.action.empty() ? b.url : urlResolve(b.url, f.action);
     action = urlStripFragment(action);
-    const size_t q = action.find('?');
-    if (q != std::string::npos) action = action.substr(0, q);
+    if (!f.post) {  // con GET los campos sustituyen a la query de la accion; con POST la query de la accion se conserva
+        const size_t q = action.find('?');
+        if (q != std::string::npos) action = action.substr(0, q);
+    }
     std::string query;
     for (size_t i = 0; i < b.doc.fields.size(); i++) {
         const FormField& ff = b.doc.fields[i];
@@ -681,7 +695,15 @@ static void submitForm(Browser& b, int formIdx, int pressedField) {
         query += urlPercentEncode(ff.name) + "=" + urlPercentEncode(v);
     }
     if (!urlIsHttp(action)) { toast("Accion de formulario no soportada", true); return; }
-    if (f.post) toast("Formulario POST: se envia como GET (aun no hay POST)", true);
+    if (f.post) {
+        g_post.body = query;
+        g_post.contentType = "application/x-www-form-urlencoded";
+        g_hasPost = true;
+        psb_log("[form] POST %s (%zu bytes)", action.c_str(), query.size());
+        navigate(b, action, true);
+        g_hasPost = false;  // por si navigate no llego a cargar (p. ej. URL interna)
+        return;
+    }
     navigate(b, query.empty() ? action : action + "?" + query, true);
 }
 // ---- teclado en pantalla (mando) ----
@@ -1164,7 +1186,7 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.5.0 ==");
+    psb_log("== psbrowser v0.5.1 ==");
     configLoad();
     bookmarksLoad();
     g_th = g_cfg.dark ? themeDark() : themeLight();
