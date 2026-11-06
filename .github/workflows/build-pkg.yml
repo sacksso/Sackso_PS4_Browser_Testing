@@ -118,8 +118,9 @@ jobs:
             -e 's/^COMMONFILES +:=.*/COMMONFILES :=/' \
             -e 's/^(LIBS +:=.*)$/\1 -lSceNet -lSceSsl -lSceHttp -lSceKeyboard/' \
             "$work/Makefile"
-          extra=""
-          if [ "$STRICT" = "true" ]; then extra="-DPSB_STRICT_TLS"; fi
+          # -O2: sin optimizacion el dibujo del lienzo (bucles por pixel) era ~5-10x mas lento (v0.4.1 compilaba sin -O).
+          extra="-O2"
+          if [ "$STRICT" = "true" ]; then extra="$extra -DPSB_STRICT_TLS"; fi
           echo "EXTRAFLAGS='$extra'" | tee logs/flags.txt
           cd "$work"
           cat Makefile > "$GITHUB_WORKSPACE/logs/makefile.txt"
