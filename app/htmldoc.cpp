@@ -283,8 +283,8 @@ struct Builder {
 };
 
 bool isSkipTag(const std::string& n) {
-    return n == "script" || n == "style" || n == "noscript" || n == "svg" || n == "template" || n == "iframe" || n == "object" ||
-           n == "select" || n == "textarea" || n == "canvas" || n == "audio" || n == "video";
+    return n == "script" || n == "style" || n == "noscript" || n == "svg" || n == "template" || n == "object" ||
+           n == "select" || n == "textarea" || n == "canvas" || n == "audio";
 }
 bool isBlock1(const std::string& n) {
     static const char* b[] = {"div", "section", "article", "header", "footer", "nav", "main", "aside", "form", "fieldset", "figure",
@@ -350,6 +350,47 @@ Document parseHtml(const std::string& html, size_t cols) {
         if (name.empty()) continue;
         std::string attrs = tag.substr(k);
 
+        if (!inHead && !closing && (name == "iframe" || name == "video" || name == "source" || name == "embed")) {
+            std::string src, type;
+            if (!getAttr(attrs, "src", src)) getAttr(attrs, "data-src", src);
+            getAttr(attrs, "type", type);
+            if (!src.empty() && (name != "source" || true)) {
+                std::string lt = lowerStr(type), ls = lowerStr(src);
+                bool isVid = name == "video" || lt.find("video") != std::string::npos || ls.find(".mp4") != std::string::npos ||
+                             ls.find(".webm") != std::string::npos || ls.find(".m3u8") != std::string::npos;
+                if (name == "iframe" || name == "embed") {
+                    b.doc.links.push_back(src);
+                    b.doc.linkLine.push_back(-1);
+                    b.block(1);
+                    b.addWord(isVid || ls.find("youtube") != std::string::npos || ls.find("player") != std::string::npos ? "[video incrustado]" : "[marco incrustado]", ST_LINK, static_cast<int>(b.doc.links.size()) - 1);
+                    b.block(1);
+                } else if (isVid) {
+                    b.doc.links.push_back(src);
+                    b.doc.linkLine.push_back(-1);
+                    b.block(1);
+                    b.addWord("[video]", ST_LINK, static_cast<int>(b.doc.links.size()) - 1);
+                    b.block(1);
+                }
+            }
+            if (name == "iframe") {  // el contenido del iframe no es HTML de la pagina
+                size_t z = findCI(html, "</iframe", i);
+                if (z != std::string::npos) { size_t z2 = html.find('>', z); i = (z2 == std::string::npos) ? n : z2 + 1; }
+            }
+            continue;
+        }
+        if (inHead && !closing && name == "meta") {
+            std::string he, ct;
+            if (getAttr(attrs, "http-equiv", he) && lowerStr(he) == "refresh" && getAttr(attrs, "content", ct)) {
+                size_t u = lowerStr(ct).find("url=");
+                if (u != std::string::npos) {
+                    std::string r = ct.substr(u + 4);
+                    while (!r.empty() && (r[0] == ' ' || r[0] == '\'' || r[0] == '"')) r.erase(0, 1);
+                    while (!r.empty() && (r.back() == ' ' || r.back() == '\'' || r.back() == '"')) r.pop_back();
+                    b.doc.refreshUrl = r;
+                }
+            }
+            continue;
+        }
         if (!closing && isSkipTag(name)) {
             std::string endTag = "</" + name;
             size_t z = findCI(html, endTag.c_str(), i);

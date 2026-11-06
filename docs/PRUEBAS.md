@@ -61,3 +61,10 @@ Esta versión **no se ha probado en la consola**. Cosas a comprobar y a reportar
 
 Limitaciones conocidas de la v0.2.0: sin imágenes, sin JavaScript, sin formularios, sin enlaces internos (`#ancla`), los caracteres no ASCII
 salen como `?` salvo vocales acentuadas/ñ, que se convierten a su letra base.
+
+## Prueba 5 (v0.3.0)
+1. Abrir `C` (barra) o F10: `about:settings`. Subir la sensibilidad con `[ + ]`/`[ ++ ]` y comprobar que el cursor se mueve más. Cada cambio se guarda en `/data/psbrowser/config.txt`.
+2. Probar la rueda; si va al revés, activar "Rueda invertida".
+3. Marcar una página con `+` o Ctrl+D; verla en `B` (`about:bookmarks`).
+4. Visitar una página con `<video>`/`<iframe>`: debe salir `[video]` o `[video incrustado]` con la URL en la barra de estado (aún no se reproduce).
+5. Devolver `log.txt` (buscar líneas `rueda:` y `[refresh]`).

@@ -17,7 +17,8 @@ Es un proyecto personal / de aprendizaje. El usuario compila con **GitHub Action
 | Fase | Qué es | Estado |
 |------|--------|--------|
 | 0 | Hello de red (HTTP/HTTPS con `sceHttp`) + visor de texto | **Probada en PS4 real** (v0.1.2): todas las URLs de prueba cargan |
-| 1a | Visor con enlaces, barra de URL, historial, teclado, ratón, mando (v0.2.0) | Compila y enlaza; **sin probar en consola** |
+| 1a | Visor con enlaces, barra de URL, historial, teclado, ratón, mando (v0.2.0) | Probado parcialmente: pantalla, red y teclado/ratón responden; el log mostró el ratón con deltas de ±1 (muy lento) |
+| 1a+ | v0.3.0: configuración (`about:settings`: sensibilidad, aceleración, rueda, inicio), marcadores, barra de botones, enlaces `[video]`/`[video incrustado]`, `<meta refresh>` | Compila (sintaxis); **sin probar en consola** |
 | 1b | FreeType (tildes/símbolos) | Pendiente |
 | 1c | Imágenes PNG/JPEG, formularios GET | Pendiente |
 | 2-3 | Reconocimiento y port de NetSurf (fetcher propio sobre `sceHttp`, frontend framebuffer/SDL2) | Pendiente |

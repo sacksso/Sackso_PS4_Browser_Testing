@@ -23,6 +23,7 @@ struct Document {
     std::vector<DocLine> lines;
     std::vector<std::string> links;  // href tal cual aparece en el HTML (sin resolver)
     std::vector<int> linkLine;       // primera linea donde aparece cada enlace
+    std::string refreshUrl;          // <meta http-equiv=refresh content="0;url=..."> (vacio si no hay)
 };
 
 // 'cols' = columnas de texto disponibles.

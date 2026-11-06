@@ -1,4 +1,5 @@
-// psbrowser - fase 1a: visor de paginas con enlaces, barra de URL, historial, teclado y raton nativos.
+// psbrowser v0.3.0 - visor de paginas con enlaces, barra de botones, configuracion (about:settings), marcadores
+// (about:bookmarks), barra de URL, historial, teclado y raton nativos. Atajos nuevos: F10 = configuracion, Ctrl+D = marcador.
 //
 // Teclado USB (libSceKeyboard): F6 o Ctrl+L = barra de URL (Enter va, Esc cancela); escribir en la pagina tambien abre la barra;
 //   Tab / Shift+Tab = siguiente/anterior enlace; Enter = abrir enlace; Backspace o Alt+Izq = atras; Alt+Der = adelante;
@@ -20,6 +21,7 @@
 #include <sys/stat.h>
 #include <utility>
 #include <vector>
+#include <cmath>
 
 #include "canvas.h"
 #include "htmldoc.h"
@@ -57,6 +59,9 @@ static const int W = 1920, H = 1080, SCALE = 2;
 static const int CHAR_W = 8 * SCALE, LINE_H = 8 * SCALE + 4;
 static const int MARGIN = 32, TOP = 112, BOTTOM = 48;
 static const int URLBAR_Y = 38, URLBAR_H = 30;
+static const int BTN_W = 44, BTN_GAP = 6, NBTN = 7;
+static const int URLBAR_X = MARGIN + NBTN * (BTN_W + BTN_GAP);
+static const char* kBtnLabel[NBTN] = {"<", ">", "R", "H", "+", "B", "C"};  // atras, adelante, recargar, inicio, marcar, marcadores, config
 static const size_t COLS = (W - 2 * MARGIN - 20) / CHAR_W;
 static const int ROWS = (H - TOP - BOTTOM) / LINE_H;
 
@@ -66,7 +71,7 @@ static const uint32_t C_BG = 0xFF101418, C_FG = 0xFFE6E6E6, C_DIM = 0xFF8A94A0, 
 
 // Codigos de tecla USB HID (los mismos que usa OpenOrbis en orbis/_types/keyboard.h).
 enum {
-    K_L = 15, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44, K_F5 = 62, K_F6 = 63, K_HOME = 74,
+    K_D = 7, K_L = 15, K_F10 = 67, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44, K_F5 = 62, K_F6 = 63, K_HOME = 74,
     K_PGUP = 75, K_END = 77, K_PGDOWN = 78, K_RIGHT = 79, K_LEFT = 80, K_DOWN = 81, K_UP = 82
 };
 
@@ -94,6 +99,66 @@ struct Browser {
 };
 static Browser B;
 
+// ------------------------------------------------------------------ configuracion y marcadores
+struct Config {
+    float mouseSens = 3.0f;   // multiplicador del movimiento crudo del raton (la lectura cruda es de +-1..2 por muestra)
+    bool mouseAccel = true;   // aceleracion: movimientos rapidos van mas lejos
+    bool wheelInvert = false;
+    int wheelStep = 3;        // lineas por muesca de la rueda
+    std::string home;         // vacio = about:home
+};
+static Config g_cfg;
+static std::vector<std::pair<std::string, std::string>> g_bookmarks;  // (url, titulo)
+static const char* kCfgPath = "/data/psbrowser/config.txt";
+static const char* kBmPath = "/data/psbrowser/bookmarks.txt";
+
+static void configSave() {
+    FILE* f = fopen(kCfgPath, "w");
+    if (!f) return;
+    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\n", g_cfg.mouseSens, g_cfg.mouseAccel ? 1 : 0,
+            g_cfg.wheelInvert ? 1 : 0, g_cfg.wheelStep, g_cfg.home.c_str());
+    fclose(f);
+}
+static void configLoad() {
+    FILE* f = fopen(kCfgPath, "r");
+    if (!f) return;
+    char line[600];
+    while (fgets(line, sizeof(line), f)) {
+        std::string l(line);
+        while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+        size_t eq = l.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = l.substr(0, eq), v = l.substr(eq + 1);
+        if (k == "mouseSens") g_cfg.mouseSens = static_cast<float>(atof(v.c_str()));
+        else if (k == "mouseAccel") g_cfg.mouseAccel = v == "1";
+        else if (k == "wheelInvert") g_cfg.wheelInvert = v == "1";
+        else if (k == "wheelStep") g_cfg.wheelStep = atoi(v.c_str());
+        else if (k == "home") g_cfg.home = v;
+    }
+    fclose(f);
+    g_cfg.mouseSens = std::max(0.5f, std::min(20.0f, g_cfg.mouseSens));
+    g_cfg.wheelStep = std::max(1, std::min(10, g_cfg.wheelStep));
+}
+static void bookmarksSave() {
+    FILE* f = fopen(kBmPath, "w");
+    if (!f) return;
+    for (auto& b : g_bookmarks) fprintf(f, "%s\t%s\n", b.first.c_str(), b.second.c_str());
+    fclose(f);
+}
+static void bookmarksLoad() {
+    FILE* f = fopen(kBmPath, "r");
+    if (!f) return;
+    char line[1200];
+    while (fgets(line, sizeof(line), f)) {
+        std::string l(line);
+        while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+        size_t t = l.find('\t');
+        if (t == std::string::npos) g_bookmarks.push_back({l, l});
+        else g_bookmarks.push_back({l.substr(0, t), l.substr(t + 1)});
+    }
+    fclose(f);
+}
+
 // Graficos / entrada (globales para que present() pueda usarlos desde navigate()).
 static Canvas* g_cv = nullptr;
 static SDL_Renderer* g_ren = nullptr;
@@ -102,6 +167,7 @@ static SDL_Texture* g_curTex = nullptr;
 static const char* g_busy = nullptr;
 static int g_mx = W / 2, g_my = H / 2;
 static bool g_mouseOk = false;
+static int g_hoverBtn = -1;
 
 static std::string htmlEscape(const std::string& s) {
     std::string o;
@@ -126,6 +192,8 @@ static const char* kHomeHtml =
     "<li><a href=\"https://text.npr.org/\">NPR (version de texto)</a></li>"
     "<li><a href=\"https://info.cern.ch/\">info.cern.ch (la primera web)</a></li>"
     "<li><a href=\"http://example.com/\">example.com</a></li>"
+    "<li><a href=\"about:bookmarks\">Marcadores</a></li>"
+    "<li><a href=\"about:settings\">Configuracion (sensibilidad del raton, rueda, inicio)</a></li>"
     "</ul>"
     "<h2>Controles</h2>"
     "<ul>"
@@ -135,6 +203,39 @@ static const char* kHomeHtml =
     "</ul>"
     "<p>Solo texto: sin JavaScript, sin imagenes y sin formularios (de momento). Los caracteres no ASCII salen como ?.</p>"
     "</body></html>";
+
+static std::string settingsHtml() {
+    char b[3000];
+    snprintf(b, sizeof(b),
+             "<html><head><title>Configuracion</title></head><body><h1>Configuracion</h1>"
+             "<h2>Raton</h2>"
+             "<p>Sensibilidad: <a href=\"psb:sens-1\">[ -- ]</a> <a href=\"psb:sens-\">[ - ]</a> %.1fx <a href=\"psb:sens+\">[ + ]</a> <a href=\"psb:sens+1\">[ ++ ]</a> (de 0.5 a 20; por defecto 3.0)</p>"
+             "<p>Aceleracion: <a href=\"psb:accel\">[ %s ]</a></p>"
+             "<p>Rueda invertida: <a href=\"psb:wheelinv\">[ %s ]</a></p>"
+             "<p>Velocidad de la rueda: <a href=\"psb:wheel-\">[ - ]</a> %d lineas <a href=\"psb:wheel+\">[ + ]</a></p>"
+             "<h2>Pagina de inicio</h2>"
+             "<p>Actual: %s</p>"
+             "<p><a href=\"psb:homehere\">[ usar la pagina anterior como inicio ]</a> <a href=\"psb:homereset\">[ restablecer ]</a></p>"
+             "<h2>Otros</h2>"
+             "<p><a href=\"about:bookmarks\">Marcadores</a> | <a href=\"about:home\">Inicio</a></p>"
+             "<p>Los cambios se guardan al momento en /data/psbrowser/config.txt. Mueve el raton para probar la sensibilidad.</p>"
+             "</body></html>",
+             g_cfg.mouseSens, g_cfg.mouseAccel ? "si" : "no", g_cfg.wheelInvert ? "si" : "no", g_cfg.wheelStep,
+             g_cfg.home.empty() ? "about:home" : htmlEscape(g_cfg.home).c_str());
+    return b;
+}
+
+static std::string bookmarksHtml() {
+    std::string h = "<html><head><title>Marcadores</title></head><body><h1>Marcadores</h1>";
+    if (g_bookmarks.empty()) h += "<p>No hay marcadores. Pulsa [+] en la barra o Ctrl+D en una pagina para guardarla.</p>";
+    h += "<ul>";
+    for (size_t i = 0; i < g_bookmarks.size(); i++) {
+        h += "<li><a href=\"" + htmlEscape(g_bookmarks[i].first) + "\">" + htmlEscape(g_bookmarks[i].second.empty() ? g_bookmarks[i].first : g_bookmarks[i].second) +
+             "</a> <a href=\"psb:delbm:" + std::to_string(i) + "\">[ borrar ]</a></li>";
+    }
+    h += "</ul><p><a href=\"about:home\">Inicio</a> | <a href=\"about:settings\">Configuracion</a></p></body></html>";
+    return h;
+}
 
 static void setStatus(const std::string& s, uint32_t color = C_DIM) {
     B.status = s;
@@ -227,6 +328,8 @@ static void loadInto(const std::string& url) {
         setStatus("");
         return;
     }
+    if (url == "about:settings") { setDocument(parseHtml(settingsHtml(), COLS), url); setStatus(""); return; }
+    if (url == "about:bookmarks") { setDocument(parseHtml(bookmarksHtml(), COLS), url); setStatus(""); return; }
     present((std::string("Cargando ") + url).c_str());
     HttpResult res;
     bool ok = http_get(url, res, 2 * 1024 * 1024);
@@ -246,6 +349,17 @@ static void loadInto(const std::string& url) {
         char info[200];
         snprintf(info, sizeof(info), "Tipo no soportado: %s (%zu bytes). Aun no hay descargas ni imagenes.", ct.c_str(), res.body.size());
         showError("Contenido no soportado", info, res.finalUrl);
+    }
+    if (!B.doc.refreshUrl.empty() && B.doc.lines.size() < 6) {  // <meta refresh> en paginas casi vacias: seguirlo una vez
+        static int refreshDepth = 0;
+        std::string target = urlStripFragment(urlResolve(B.url, B.doc.refreshUrl));
+        if (refreshDepth < 3 && urlIsHttp(target) && target != B.url) {
+            refreshDepth++;
+            psb_log("[refresh] -> %s", target.c_str());
+            loadInto(target);
+            refreshDepth--;
+            return;
+        }
     }
     char st[160];
     snprintf(st, sizeof(st), "HTTP %d - %zu bytes%s - %zu lineas, %zu enlaces", res.status, res.body.size(),
@@ -306,11 +420,55 @@ static void goForward() {
 static void reload() {
     if (B.histPos >= 0) navigate(B.hist[B.histPos].req, false);
 }
-static void goHome() { navigate("about:home", true); }
+static void goHome() { navigate(g_cfg.home.empty() ? "about:home" : g_cfg.home, true); }
+
+static void addBookmark() {
+    if (B.url.empty() || B.url.compare(0, 6, "about:") == 0) { setStatus("Esta pagina no se puede guardar", C_BAD); return; }
+    for (auto& b : g_bookmarks) if (b.first == B.url) { setStatus("Ya estaba en marcadores"); return; }
+    g_bookmarks.push_back({B.url, B.doc.title});
+    bookmarksSave();
+    setStatus("Marcador guardado (" + std::to_string(g_bookmarks.size()) + ")", C_HEAD);
+}
+
+// Acciones internas (enlaces psb:...). Devuelve true si la accion se reconocio.
+static bool handleAction(const std::string& a) {
+    bool cfg = true, refresh = true;
+    if (a == "sens-1") g_cfg.mouseSens -= 1.0f;
+    else if (a == "sens-") g_cfg.mouseSens -= 0.5f;
+    else if (a == "sens+") g_cfg.mouseSens += 0.5f;
+    else if (a == "sens+1") g_cfg.mouseSens += 1.0f;
+    else if (a == "accel") g_cfg.mouseAccel = !g_cfg.mouseAccel;
+    else if (a == "wheelinv") g_cfg.wheelInvert = !g_cfg.wheelInvert;
+    else if (a == "wheel-") g_cfg.wheelStep--;
+    else if (a == "wheel+") g_cfg.wheelStep++;
+    else if (a == "homehere") {
+        const int prev = B.histPos - 1;
+        if (prev >= 0) g_cfg.home = B.hist[prev].req;
+        else g_cfg.home.clear();
+    } else if (a == "homereset") g_cfg.home.clear();
+    else if (a.compare(0, 6, "delbm:") == 0) {
+        size_t i = static_cast<size_t>(atoi(a.c_str() + 6));
+        if (i < g_bookmarks.size()) { g_bookmarks.erase(g_bookmarks.begin() + i); bookmarksSave(); }
+        cfg = false;
+    } else return false;
+    g_cfg.mouseSens = std::max(0.5f, std::min(20.0f, g_cfg.mouseSens));
+    g_cfg.wheelStep = std::max(1, std::min(10, g_cfg.wheelStep));
+    if (cfg) configSave();
+    if (refresh) {
+        const int keep = B.scroll;
+        loadInto(B.url);
+        B.scroll = keep;
+        clampScroll();
+        B.dirty = true;
+    }
+    return true;
+}
 
 static void followLink(int id) {
     if (id < 0 || id >= static_cast<int>(B.doc.links.size())) return;
     const std::string& href = B.doc.links[id];
+    if (href.compare(0, 4, "psb:") == 0) { handleAction(href.substr(4)); return; }
+    if (href == "about:home" || href == "about:settings" || href == "about:bookmarks") { navigate(href, true); return; }
     std::string lower = href.substr(0, 11);
     for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     if (lower.compare(0, 11, "javascript:") == 0 || lower.compare(0, 7, "mailto:") == 0 || lower.compare(0, 4, "tel:") == 0) {
@@ -346,6 +504,7 @@ static uint32_t styleColor(uint8_t st) {
 
 static std::string linkTarget(int id) {
     if (id < 0 || id >= static_cast<int>(B.doc.links.size())) return std::string();
+    if (B.doc.links[id].compare(0, 4, "psb:") == 0 || B.doc.links[id].compare(0, 6, "about:") == 0) return B.doc.links[id];
     return urlResolve(B.url, B.doc.links[id]);
 }
 
@@ -355,14 +514,21 @@ static void drawPage() {
     // Fila 1: titulo
     std::string title = B.doc.title.empty() ? B.url : B.doc.title;
     int x = MARGIN + cv.text(MARGIN, 10, "psbrowser", SCALE, C_ACC);
-    cv.text(x, 10, (" | " + clip(title, 100)).c_str(), SCALE, C_FG);
+    cv.text(x, 10, (" v0.3.0 | " + clip(title, 100)).c_str(), SCALE, C_FG);
     // Fila 2: barra de URL
-    cv.rect(MARGIN, URLBAR_Y, W - 2 * MARGIN, URLBAR_H, B.urlEdit ? C_ACC : C_DIM);
-    cv.rect(MARGIN + 2, URLBAR_Y + 2, W - 2 * MARGIN - 4, URLBAR_H - 4, B.urlEdit ? C_BOXEDIT : C_BOX);
-    const size_t fit = (W - 2 * MARGIN - 24) / CHAR_W;
+    for (int i = 0; i < NBTN; i++) {
+        const int bx = MARGIN + i * (BTN_W + BTN_GAP);
+        const bool hot = g_hoverBtn == i;
+        cv.rect(bx, URLBAR_Y, BTN_W, URLBAR_H, hot ? C_ACC : C_DIM);
+        cv.rect(bx + 2, URLBAR_Y + 2, BTN_W - 4, URLBAR_H - 4, hot ? C_BOXEDIT : C_BOX);
+        cv.text(bx + (BTN_W - CHAR_W) / 2, URLBAR_Y + 7, kBtnLabel[i], SCALE, hot ? C_BOLD : C_FG);
+    }
+    cv.rect(URLBAR_X, URLBAR_Y, W - MARGIN - URLBAR_X, URLBAR_H, B.urlEdit ? C_ACC : C_DIM);
+    cv.rect(URLBAR_X + 2, URLBAR_Y + 2, W - MARGIN - URLBAR_X - 4, URLBAR_H - 4, B.urlEdit ? C_BOXEDIT : C_BOX);
+    const size_t fit = (W - MARGIN - URLBAR_X - 24) / CHAR_W;
     std::string shown = B.urlEdit ? B.urlText + "_" : B.url;
     if (B.urlEdit && shown.size() > fit) shown = shown.substr(shown.size() - fit);
-    cv.text(MARGIN + 10, URLBAR_Y + 7, clip(shown, fit).c_str(), SCALE, B.urlEdit && B.urlFresh ? C_HEAD : C_FG);
+    cv.text(URLBAR_X + 10, URLBAR_Y + 7, clip(shown, fit).c_str(), SCALE, B.urlEdit && B.urlFresh ? C_HEAD : C_FG);
     // Fila 3: estado / destino del enlace
     std::string line3;
     uint32_t c3 = C_DIM;
@@ -399,7 +565,7 @@ static void drawPage() {
     }
     // Pie
     char foot[256];
-    snprintf(foot, sizeof(foot), "F6 URL | Tab/Enter enlaces | Backspace atras | F5 recargar | raton y mando | linea %d/%d",
+    snprintf(foot, sizeof(foot), "F6 URL | F10 config | Ctrl+D marcador | Tab/Enter enlaces | Backspace atras | linea %d/%d",
              total ? std::min(B.scroll + 1, total) : 0, total);
     cv.text(MARGIN, H - BOTTOM + 14, clip(foot, 116).c_str(), SCALE, C_DIM);
 }
@@ -455,7 +621,25 @@ static int linkAt(int x, int y) {
     return -1;
 }
 
-static bool inUrlBar(int x, int y) { return y >= URLBAR_Y && y < URLBAR_Y + URLBAR_H && x >= MARGIN && x < W - MARGIN; }
+static bool inUrlBar(int x, int y) { return y >= URLBAR_Y && y < URLBAR_Y + URLBAR_H && x >= URLBAR_X && x < W - MARGIN; }
+static int buttonAt(int x, int y) {
+    if (y < URLBAR_Y || y >= URLBAR_Y + URLBAR_H || x < MARGIN) return -1;
+    int i = (x - MARGIN) / (BTN_W + BTN_GAP);
+    if (i >= NBTN || (x - MARGIN) % (BTN_W + BTN_GAP) >= BTN_W) return -1;
+    return i;
+}
+static void pressButton(int i) {
+    switch (i) {
+        case 0: goBack(); break;
+        case 1: goForward(); break;
+        case 2: reload(); break;
+        case 3: goHome(); break;
+        case 4: addBookmark(); break;
+        case 5: navigate("about:bookmarks", true); break;
+        case 6: navigate("about:settings", true); break;
+        default: break;
+    }
+}
 
 static void onKeyDown(int code, int ch, uint32_t mods) {
     const bool shift = (mods & (ORBIS_KEYBOARD_MOD_LEFT_SHIFT | ORBIS_KEYBOARD_MOD_RIGHT_SHIFT)) != 0;
@@ -488,6 +672,8 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
         case K_F6: startUrlEdit(B.url, true); return;
         case K_L: if (ctrl) { startUrlEdit(B.url, true); return; } break;
         case K_F5: reload(); return;
+        case K_F10: navigate("about:settings", true); return;
+        case K_D: if (ctrl) { addBookmark(); return; } break;
         case K_BACKSPACE: goBack(); return;
         case K_LEFT: if (alt) { goBack(); return; } break;
         case K_RIGHT: if (alt) { goForward(); return; } break;
@@ -519,7 +705,9 @@ static bool repeatable(uint16_t code) {
 
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser fase 1a ==");
+    psb_log("== psbrowser v0.3.0 ==");
+    configLoad();
+    bookmarksLoad();
 
     SDL_Init(0);
     const struct { Uint32 f; const char* n; } subs[] = {{SDL_INIT_VIDEO, "VIDEO"}, {SDL_INIT_JOYSTICK, "JOYSTICK"}, {SDL_INIT_EVENTS, "EVENTS"}};
@@ -547,7 +735,7 @@ int main(int, char**) {
 
     present("Iniciando...");
     const bool netOk = net_init();
-    navigate("about:home", true);
+    navigate(g_cfg.home.empty() ? "about:home" : g_cfg.home, true);
     if (!netOk) setStatus("Red no disponible (mira log.txt)", C_BAD);
     redrawIfDirty();
 
@@ -627,20 +815,35 @@ int main(int, char**) {
             PsMouseState ms;
             if (psmouse_poll(&ms)) {
                 if (ms.dx || ms.dy) {
-                    g_mx = std::max(0, std::min(W - 1, g_mx + ms.dx));
-                    g_my = std::max(0, std::min(H - 1, g_my + ms.dy));
+                    float gain = g_cfg.mouseSens;
+                    if (g_cfg.mouseAccel) {  // movimientos rapidos (muchas cuentas por lectura) avanzan mas
+                        const float mag = std::sqrt(static_cast<float>(ms.dx * ms.dx + ms.dy * ms.dy));
+                        gain *= 1.0f + std::min(mag, 12.0f) * 0.12f;
+                    }
+                    static float fx = 0, fy = 0;  // resto fraccionario: asi sensibilidades <1x o entre cuentas no se pierden
+                    fx += ms.dx * gain;
+                    fy += ms.dy * gain;
+                    const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+                    fx -= ix;
+                    fy -= iy;
+                    g_mx = std::max(0, std::min(W - 1, g_mx + ix));
+                    g_my = std::max(0, std::min(H - 1, g_my + iy));
                     moved = true;
                     int h = inUrlBar(g_mx, g_my) ? -1 : linkAt(g_mx, g_my);
                     if (h != B.hover) { B.hover = h; B.dirty = true; }
+                    int hb = buttonAt(g_mx, g_my);
+                    if (hb != g_hoverBtn) { g_hoverBtn = hb; B.dirty = true; }
                 }
                 if (ms.wheel) {
                     static int wlog = 0;
                     if (wlog < 10) { wlog++; psb_log("rueda: %d", ms.wheel); }
-                    scrollBy(ms.wheel > 0 ? -3 : 3);  // si va al reves, invertir aqui
+                    scrollBy(((ms.wheel > 0) != g_cfg.wheelInvert ? -1 : 1) * g_cfg.wheelStep);
                 }
                 const uint32_t pressed = ms.buttons & ~prevButtons;
                 if (pressed & 1) {  // izquierdo
-                    if (inUrlBar(g_mx, g_my)) startUrlEdit(B.url, true);
+                    int bi = buttonAt(g_mx, g_my);
+                    if (bi >= 0) pressButton(bi);
+                    else if (inUrlBar(g_mx, g_my)) startUrlEdit(B.url, true);
                     else {
                         if (B.urlEdit) { B.urlEdit = false; B.dirty = true; }
                         int l = linkAt(g_mx, g_my);
