@@ -128,7 +128,7 @@ static bool singleGet(const std::string& url, HttpResult& out, size_t maxBody, s
         psb_log("[http] %s fallo 0x%08X (%s)", stage, static_cast<unsigned>(code), url.c_str());
     };
 
-    tpl = sceHttpCreateTemplate(g_httpCtxId, "Mozilla/5.0 (PlayStation 4; psbrowser/0.1)", ORBIS_HTTP_VERSION_1_1, 1);
+    tpl = sceHttpCreateTemplate(g_httpCtxId, "Mozilla/5.0 (PlayStation 4; psbrowser/0.2)", ORBIS_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { fail("createTemplate", tpl); tpl = 0; goto done; }
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);

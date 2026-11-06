@@ -5,7 +5,13 @@ JavaScript moderno). Mientras tanto, el repo avanza por fases pequeñas que se p
 
 > Uso personal / aprendizaje. Reutiliza el toolchain y el CI que ya funcionaron en el proyecto de Ren'Py para PS4.
 
-## Estado: fase 0 (hello de red + visor de texto)
+## Estado: fase 1a (visor con enlaces, barra de URL, historial, teclado y ratón)
+
+La fase 0 (red + TLS) ya está **probada en una PS4 real** (ver `docs/CONTEXTO.md`). La fase 1a es nueva: compila y enlaza con OpenOrbis, pero **no se ha probado en la consola**.
+
+Qué hace la fase 1a: abre una página de inicio local (`about:home`), descarga páginas http/https con `sceHttp`, las convierte a texto con enlaces (sin JavaScript ni imágenes), y permite navegar con teclado USB (F6 = barra de URL, Tab/Enter = enlaces, Backspace = atrás, F5 = recargar), ratón USB (clic, rueda, clic derecho = atrás) y mando. Escribir algo que no sea una URL hace una búsqueda en DuckDuckGo (versión HTML). Controles completos en la propia página de inicio.
+
+### Fase 0 (referencia)
 
 Qué hace el PKG actual:
 

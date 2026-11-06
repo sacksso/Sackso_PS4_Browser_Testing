@@ -2,8 +2,10 @@
 
 | Fase | Objetivo | Estado |
 |------|----------|--------|
-| 0 | Hello de red: HTTP/HTTPS con `sceHttp`, visor de texto, CI que genera PKG | Código listo, compila; **pendiente de probar en PS4** |
-| 1 | Visor útil propio: enlaces navegables, barra de URL con teclado nativo (`libSceKeyboard`), ratón (`libSceMouse`), fuentes TrueType (FreeType), imágenes PNG/JPEG | Sin empezar |
+| 0 | Hello de red: HTTP/HTTPS con `sceHttp`, visor de texto, CI que genera PKG | **Hecho y probado en PS4** (v0.1.2) |
+| 1a | Visor con enlaces navegables, barra de URL (teclado nativo `libSceKeyboard`), ratón (`libSceMouse`), mando, historial, página de inicio | Código listo y compilado (v0.2.0); **pendiente de probar en PS4** |
+| 1b | Texto con FreeType (tildes y símbolos) y fuente proporcional | Sin empezar |
+| 1c | Imágenes PNG/JPEG (libpng, libjpeg-turbo) y formularios GET simples | Sin empezar |
 | 2 | Reconocimiento de NetSurf en CI: clonar, listar dependencias, compilar las librerías `libnsfb`, `libcss`, `libdom`, `hubbub`... como `.a` con `orbis-cc` | Sin empezar |
 | 3 | Frontend framebuffer de NetSurf sobre SDL2 de OpenOrbis + *fetcher* propio basado en `sceHttp` | Sin empezar |
 | 4 | Extras: marcadores, descargas a `/data`, almacén de certificados propio, caché | Sin empezar |

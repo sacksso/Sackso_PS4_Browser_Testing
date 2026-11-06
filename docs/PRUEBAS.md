@@ -44,3 +44,20 @@ Es una hipótesis, no está confirmada. La v0.1.2:
 
 Qué miro: la línea `sceHttpSetResponseHeaderMaxSize(...) = 0x...` (0 = aceptada), si `/wiki/PlayStation_4` pasa a dar 200 y, si no, el tamaño
 de las cabeceras de las páginas que sí funcionan.
+
+## Prueba 4 (v0.2.0, fase 1a): visor con enlaces y entrada
+
+Esta versión **no se ha probado en la consola**. Cosas a comprobar y a reportar (el log `/data/psbrowser/log.txt` lo registra todo):
+
+1. Arranca y muestra la página de inicio (`psbrowser - inicio`) con enlaces. ¿Se ve bien a 1080p?
+2. **Teclado USB:** Tab / Shift+Tab seleccionan enlaces, Enter los abre, F6 abre la barra de URL, escribir y Enter navega, Esc cancela, Backspace vuelve atrás.
+   Mira en el log las líneas `tecla: codigo=... char=...` (se guardan las 60 primeras).
+3. **Ratón USB:** ¿aparece el cursor? ¿se mueve a velocidad razonable? ¿clic izquierdo abre el enlace bajo el cursor, clic derecho vuelve atrás?
+   **Rueda:** la dirección es una suposición (valor positivo = subir). Si va al revés, dímelo (línea `rueda: N` en el log).
+4. **Mando:** los índices de botón son una suposición del DS4 (0 abrir, 1 atrás, 2 recargar, 3 inicio, 4/5 página). El log anota `boton N` y `hat N`;
+   dime qué botón físico produjo cada número si no coincide.
+5. **Búsqueda:** F6, escribir `ps4 homebrew`, Enter (usa `html.duckduckgo.com/html/`, no probado).
+6. Páginas largas: Wikipedia, Hacker News. ¿Es fluido el desplazamiento? (El dibujo es por software a 1080p; si va lento, dímelo.)
+
+Limitaciones conocidas de la v0.2.0: sin imágenes, sin JavaScript, sin formularios, sin enlaces internos (`#ancla`), los caracteres no ASCII
+salen como `?` salvo vocales acentuadas/ñ, que se convierten a su letra base.
