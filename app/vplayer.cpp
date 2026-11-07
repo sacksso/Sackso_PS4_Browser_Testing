@@ -18,6 +18,7 @@
 #include "canvas.h"
 #include "log.h"
 #include "vsource.h"
+#include "vsync.h"
 
 static uint32_t SDL_GetTicksCompat() { return static_cast<uint32_t>(sceKernelGetProcessTime() / 1000); }  // ms desde el inicio del proceso
 
@@ -151,7 +152,13 @@ struct Player {
     int argbW = 0, argbH = 0;
     unsigned long frames = 0;
     uint32_t fpsT0 = 0, fpsN = 0, startTick = 0, lastActiveCheck = 0, lastFrameTick = 0;
-    float fps = 0;
+    float fps = 0, speed = 0, convMs = 0;
+    // sincronizacion por reloj de pared (solo video sin audio, ver vsync.h) y fotograma retenido
+    VSync sync;
+    std::vector<uint32_t> pend;
+    int pendW = 0, pendH = 0;
+    uint64_t pendTs = 0, fpsTs0 = 0, convUsAcc = 0;
+    unsigned long dropped = 0, convN = 0;
     int inactiveCount = 0;
     bool dumped = false;
 };
@@ -229,6 +236,17 @@ void avFreeTexture(void*, void* p) {
     }
 }
 
+// Tras cerrar el AvPlayer no deberia quedar ninguna textura; si queda, se libera aqui (y se avisa en el log).
+void releaseLeftoverTextures() {
+    std::lock_guard<std::mutex> lk(g_texMtx);
+    if (!g_tex.empty()) psb_log("[vp] AVISO: quedaban %zu texturas sin liberar tras cerrar el AvPlayer; se liberan ahora", g_tex.size());
+    for (const TexAlloc& t : g_tex) {
+        if (t.direct) { sceKernelMunmap(t.addr, t.len); sceKernelReleaseDirectMemory(t.phys, t.len); }
+        else alignedFree(t.addr);
+    }
+    g_tex.clear();
+}
+
 // ---------------------------------------------------------------- lectura de datos (fileReplacement)
 int32_t frOpen(void*, const char*) { return P.src ? 0 : -1; }
 int32_t frClose(void*) { return 0; }
@@ -304,12 +322,17 @@ void openMain(std::string source, std::string referer) {
     if (P.cancel) return;
 
     setStage("Cargando el reproductor del sistema...");
-    int rc = sceSysmoduleLoadModule(ORBIS_SYSMODULE_AV_PLAYER);
-    psb_log("[vp] sceSysmoduleLoadModule(AV_PLAYER) = 0x%08X", static_cast<unsigned>(rc));
-    rc = sceUserServiceInitialize(nullptr);
-    psb_log("[vp] sceUserServiceInitialize = 0x%08X (ya inicializado es normal)", static_cast<unsigned>(rc));
-    rc = sceAudioOutInit();
-    psb_log("[vp] sceAudioOutInit = 0x%08X", static_cast<unsigned>(rc));
+    int rc = 0;
+    static bool s_sysInit = false;  // modulo del sistema, UserService y AudioOut se inicializan UNA sola vez por proceso
+    if (!s_sysInit) {
+        s_sysInit = true;
+        rc = sceSysmoduleLoadModule(ORBIS_SYSMODULE_AV_PLAYER);
+        psb_log("[vp] sceSysmoduleLoadModule(AV_PLAYER) = 0x%08X", static_cast<unsigned>(rc));
+        rc = sceUserServiceInitialize(nullptr);
+        psb_log("[vp] sceUserServiceInitialize = 0x%08X (ya inicializado es normal)", static_cast<unsigned>(rc));
+        rc = sceAudioOutInit();
+        psb_log("[vp] sceAudioOutInit = 0x%08X", static_cast<unsigned>(rc));
+    }
     P.audio = sceAudioOutOpen(ORBIS_USER_SERVICE_USER_ID_SYSTEM, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN, 0, 1024, 48000, ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_STEREO);
     psb_log("[vp] sceAudioOutOpen = %d", P.audio);
     if (P.cancel) return;
@@ -460,6 +483,7 @@ bool vp_open(const std::string& source, const std::string& title, const std::str
     P.posMs = 0; P.vw = P.vh = 0;
     P.frames = 0; P.fps = 0; P.fpsN = 0; P.fpsT0 = 0; P.inactiveCount = 0; P.dumped = false; P.lastFrameTick = 0;
     P.argbW = P.argbH = 0;
+    P.sync.reset(); P.pend.clear(); P.pendW = P.pendH = 0; P.pendTs = 0; P.fpsTs0 = 0; P.convUsAcc = 0; P.convN = 0; P.dropped = 0; P.speed = 0; P.convMs = 0;
     P.volume = g_volDefault;
     P.av = nullptr; P.audio = -1; P.src = nullptr;
     P.state = VP_OPENING;
@@ -476,18 +500,30 @@ void vp_close() {
     P.audioStop = true;
     if (P.audioTh.joinable()) P.audioTh.join();
     if (P.av) {
-        sceAvPlayerStop(P.av);
+        const int rs = sceAvPlayerStop(P.av);
+        sceKernelUsleep(60 * 1000);  // deja que terminen los hilos internos del AvPlayer antes de cerrarlo
         const int rc = sceAvPlayerClose(P.av);
-        psb_log("[vp] sceAvPlayerClose = 0x%08X", static_cast<unsigned>(rc));
+        psb_log("[vp] sceAvPlayerStop = 0x%08X, sceAvPlayerClose = 0x%08X", static_cast<unsigned>(rs), static_cast<unsigned>(rc));
         P.av = nullptr;
     }
-    if (P.audio > 0) { sceAudioOutClose(P.audio); P.audio = -1; }
+    if (P.audio > 0) {
+        const int rc = sceAudioOutClose(P.audio);
+        psb_log("[vp] sceAudioOutClose = 0x%08X", static_cast<unsigned>(rc));
+        P.audio = -1;
+    }
+    releaseLeftoverTextures();
     delete P.src;
     P.src = nullptr;
     P.argb.clear();
     P.argb.shrink_to_fit();
+    P.pend.clear();
+    P.pend.shrink_to_fit();
+    P.sync.reset();
+    psb_log("[vp] cerrado limpio");
     P.state = VP_CLOSED;
 }
+
+void vp_shutdown() { vp_close(); }
 
 bool vp_active() { return P.state != VP_CLOSED; }
 
@@ -502,7 +538,7 @@ VpInfo vp_info() {
     r.vw = P.vw; r.vh = P.vh;
     r.hasVideo = P.haveVideo; r.hasAudio = P.haveAudio;
     r.volume = P.volume;
-    r.frames = P.frames; r.fps = P.fps;
+    r.frames = P.frames; r.fps = P.fps; r.dropped = P.dropped; r.speed = P.speed; r.convMs = P.convMs; r.clockSync = !P.haveAudio;
     if (P.src) { r.bufPct = P.src->bufferedPct(); r.netWait = P.src->waiting(); }
     if (r.state == VP_PLAYING && P.buffering) r.state = VP_BUFFERING;
     if (r.state == VP_PLAYING && P.userPaused) r.state = VP_PAUSED;
@@ -516,7 +552,7 @@ void vp_pause_toggle() {
     const int s = P.state;
     if (s != VP_PLAYING && s != VP_PAUSED) return;
     if (!P.userPaused) { P.userPaused = true; sceAvPlayerPause(P.av); psb_log("[vp] pausa"); }
-    else { sceAvPlayerResume(P.av); P.userPaused = false; psb_log("[vp] continuar"); }
+    else { sceAvPlayerResume(P.av); P.userPaused = false; P.sync.reset(); psb_log("[vp] continuar"); }
 }
 
 void vp_seek_abs(uint64_t ms) {
@@ -528,6 +564,7 @@ void vp_seek_abs(uint64_t ms) {
     psb_log("[vp] JumpToTime(%llu ms) = 0x%08X", static_cast<unsigned long long>(ms), static_cast<unsigned>(rc));
     P.posMs = ms;
     P.flushAudio = true;
+    P.sync.reset();  // tras un salto hay que volver a anclar el reloj de pared al primer fotograma nuevo
 }
 
 void vp_seek_rel(int64_t deltaMs) {
@@ -537,6 +574,27 @@ void vp_seek_rel(int64_t deltaMs) {
 }
 
 void vp_volume_rel(int d) { P.volume = std::max(0, std::min(100, P.volume.load() + d)); }
+
+// Contabilidad de un fotograma mostrado (hilo principal): contador, fps, velocidad real y, cada 2 s, una linea de diagnostico.
+static bool vpCountFrame(uint32_t now, uint64_t ts) {
+    P.frames++;
+    P.lastFrameTick = now;
+    if (P.fpsT0 == 0) { P.fpsT0 = now; P.fpsTs0 = ts; P.fpsN = 0; }
+    P.fpsN++;
+    if (now - P.fpsT0 >= 2000) {
+        const uint32_t wallMs = now - P.fpsT0;
+        const uint64_t contMs = ts >= P.fpsTs0 ? ts - P.fpsTs0 : 0;
+        P.fps = P.fpsN * 1000.0f / static_cast<float>(wallMs);
+        P.speed = static_cast<float>(contMs) / static_cast<float>(wallMs);
+        P.convMs = P.convN ? static_cast<float>(P.convUsAcc) / 1000.0f / static_cast<float>(P.convN) : 0.0f;
+        if (P.frames < 400 || (P.frames % 300) == 0)
+            psb_log("[vp] %.1f fps mostrados | velocidad %.2fx (%llu ms de contenido en %u ms de pared) | descartados %lu | conversion %.1f ms | total %lu pos=%llu ms | reloj=%s",
+                    P.fps, P.speed, static_cast<unsigned long long>(contMs), wallMs, P.dropped, P.convMs, P.frames, static_cast<unsigned long long>(P.posMs.load()),
+                    P.haveAudio ? "audio" : "pared");
+        P.fpsT0 = now; P.fpsTs0 = ts; P.fpsN = 0; P.convUsAcc = 0; P.convN = 0;
+    }
+    return true;
+}
 
 bool vp_update() {
     const int st = P.state;
@@ -551,33 +609,62 @@ bool vp_update() {
         }
     }
     if (!P.haveVideo) return false;
+    // Sin audio manda el reloj de pared (VSync): se descartan los fotogramas atrasados en vez de ir en camara lenta. Con audio manda
+    // el reloj de audio del AvPlayer (sin tocar: un fotograma por vuelta, como en v0.8.0).
+    const bool useClock = !P.haveAudio;
+    uint64_t ts = 0;
+    int dropped = 0;
+    bool hold = false;
     AvFrameInfoEx fi;
     memset(&fi, 0, sizeof(fi));
-    if (!sceAvPlayerGetVideoDataEx(P.av, &fi) || !fi.data) return false;
+    if (useClock && P.sync.pending()) {  // hay un fotograma ya convertido esperando su turno
+        if (!P.sync.pendingDue(now)) return false;
+        P.sync.clearPending();
+        P.argb.swap(P.pend);
+        std::swap(P.argbW, P.pendW);
+        std::swap(P.argbH, P.pendH);
+        ts = P.pendTs;
+        P.vw = P.argbW; P.vh = P.argbH;
+        return vpCountFrame(now, ts);
+    }
+    auto pull = [&](uint64_t& t) {
+        AvFrameInfoEx tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        if (!sceAvPlayerGetVideoDataEx(P.av, &tmp) || !tmp.data) return false;
+        fi = tmp;  // solo se sobrescribe si hubo fotograma: la ultima peticion fallida no debe borrar el elegido
+        t = tmp.timestamp;
+        return true;
+    };
+    if (useClock) {
+        const VSync::Result r = P.sync.pump(now, pull);
+        if (!r.have) return false;
+        ts = r.ts; dropped = r.dropped; hold = r.hold;
+    } else if (!pull(ts)) {
+        return false;
+    }
     const AvVideoEx& v = fi.details.video;
     int w = static_cast<int>(v.width), h = static_cast<int>(v.height);
     if (w < 16 || h < 16 || w > 4096 || h > 4096) {
         static int bad = 0;
         if (bad++ < 5) psb_log("[vp] fotograma con dimensiones raras: %dx%d (pitch=%u)", w, h, v.pitch);
+        P.sync.clearPending();
         return false;
     }
     const int pitch = v.pitch >= v.width ? static_cast<int>(v.pitch) : w;
     if (!P.dumped) { P.dumped = true; dumpFirstFrame(fi, w, h, pitch); }
-    if (static_cast<int>(P.argb.size()) < w * h || P.argbW != w || P.argbH != h) { P.argb.assign(static_cast<size_t>(w) * h, 0xFF000000u); P.argbW = w; P.argbH = h; }
+    std::vector<uint32_t>& dst = hold ? P.pend : P.argb;
+    int& dw = hold ? P.pendW : P.argbW;
+    int& dh = hold ? P.pendH : P.argbH;
+    if (static_cast<int>(dst.size()) < w * h || dw != w || dh != h) { dst.assign(static_cast<size_t>(w) * h, 0xFF000000u); dw = w; dh = h; }
     const uint8_t* y = static_cast<const uint8_t*>(fi.data);
-    nv12ToArgb(y, pitch, y + static_cast<size_t>(pitch) * h, pitch, w, h, P.argb.data(), h >= 720);
+    const uint64_t c0 = sceKernelGetProcessTime();
+    nv12ToArgb(y, pitch, y + static_cast<size_t>(pitch) * h, pitch, w, h, dst.data(), h >= 720);
+    P.convUsAcc += sceKernelGetProcessTime() - c0;
+    P.convN++;
+    P.dropped += static_cast<unsigned long>(dropped);
+    if (hold) { P.pendTs = ts; return false; }  // va adelantado: se muestra cuando le toque (pendingDue)
     P.vw = w; P.vh = h;
-    P.frames++;
-    P.lastFrameTick = now;
-    if (P.fpsT0 == 0) P.fpsT0 = now;
-    P.fpsN++;
-    if (now - P.fpsT0 >= 2000) {
-        P.fps = P.fpsN * 1000.0f / static_cast<float>(now - P.fpsT0);
-        if (P.frames < 400 || (P.frames % 300) == 0) psb_log("[vp] %.1f fotogramas/s (total %lu) pos=%llu ms", P.fps, P.frames, static_cast<unsigned long long>(P.posMs.load()));
-        P.fpsT0 = now;
-        P.fpsN = 0;
-    }
-    return true;
+    return vpCountFrame(now, ts);
 }
 
 void vp_draw_video(Canvas& cv, int x, int y, int w, int h, bool half) {

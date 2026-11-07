@@ -43,3 +43,12 @@ g++ -std=c++17 -pthread -fsanitize=thread -O1 -Itools/stubs -Iapp tools/tests/te
 sh tools/tests/run_scanvideos.sh
 ```
 `vplayer.cpp` (libSceAvPlayer/libSceAudioOut) solo se comprueba con el toolchain real (`tools/build_local.sh`) y en la consola.
+
+# v0.8.1: sincronizacion de video
+```
+# VSync (app/vsync.h): reproductores simulados (consumo, reloj propio, vuelta rapida, seek, parada de red); ASan/UBSan
+g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -Iapp tools/tests/test_vsync.cpp -o /tmp/test_vsync && /tmp/test_vsync
+# vplayer.cpp: solo sintaxis, con stubs de orbis/AudioOut.h, UserService.h, Sysmodule.h y libkernel.h (no estan en tools/stubs: crearlos en /tmp)
+```
+`run_scanvideos.sh` ahora extrae desde `// Clasifica una URL de video` (incluye `vidScore`).
+

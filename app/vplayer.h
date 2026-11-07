@@ -19,7 +19,11 @@ struct VpInfo {
     bool hasVideo = false, hasAudio = false;
     int volume = 80;                  // 0..100
     unsigned long frames = 0;         // fotogramas de video recibidos
-    float fps = 0;
+    float fps = 0;                    // fotogramas mostrados por segundo (ventana de 2 s)
+    float speed = 0;                  // velocidad real = contenido / reloj de pared (1.0 = tiempo real; 0.5 = camara lenta)
+    float convMs = 0;                 // coste medio de convertir un fotograma NV12 -> ARGB
+    unsigned long dropped = 0;        // fotogramas descartados por ir atrasados (solo sincronizacion por reloj de pared)
+    bool clockSync = false;           // true = video sin audio sincronizado con el reloj de pared
     int bufPct = 100;                 // % de la ventana de lectura anticipada (solo streaming)
     bool netWait = false;             // esperando datos de la red
     int noFrameSecs = 0;              // segundos reproduciendo sin recibir ningun fotograma (sospecha de decodificador roto)
@@ -32,6 +36,7 @@ void vp_set_volume_default(int pct);
 // Empieza a abrir (en un hilo; no bloquea). source = URL http(s) o ruta de archivo. false si ya hay un video abierto.
 bool vp_open(const std::string& source, const std::string& title, const std::string& referer);
 void vp_close();
+void vp_shutdown();                   // cierra video, audio y texturas; llamar justo antes de salir del proceso
 bool vp_active();                     // hay un video abierto, cargando o con error visible (state != VP_CLOSED)
 VpInfo vp_info();
 void vp_pause_toggle();

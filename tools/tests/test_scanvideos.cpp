@@ -38,6 +38,15 @@ int main() {
     CHECK(v.empty());
     v = scan("<p>archivo.mp4</p>");    // sin barra: no es una URL
     CHECK(v.empty());
+    // clasificacion: vistas previas al final y avisadas; calidad mayor primero (caso real: td.mp4 de 10 s en un listado)
+    v = scan("<a href=\"https://tbv.sb-cd.com/t/1/320x180/td.mp4\"></a><a href=\"https://cdn.x.com/a-480p.mp4\"></a><a href=\"https://cdn.x.com/a-1080p.mp4\"></a>");
+    CHECK(v.size() == 3);
+    CHECK(v.size() == 3 && v[0].url.find("1080p") != std::string::npos && v[1].url.find("480p") != std::string::npos && v[2].preview);
+    CHECK(v.size() == 3 && !v[0].preview && v[2].note.find("VISTA PREVIA") != std::string::npos);
+    v = scan("<a href=\"/x/preview/a.mp4\"></a><a href=\"/x/trailer.mp4\"></a>");
+    CHECK(v.size() == 2 && v[0].preview && v[1].preview);
+    v = scan("<a href=\"/a.m3u8\"></a><a href=\"/b.mp4\"></a>");   // HLS/WebM puntuan menos que un MP4 normal
+    CHECK(v.size() == 2 && v[0].url.find("b.mp4") != std::string::npos);
     // limite de 60 y rendimiento en una pagina de 2 MB
     std::string many; for (int i = 0; i < 200; i++) many += "<a href=\"/v" + std::to_string(i) + ".mp4\"></a>";
     v = scan(many); CHECK(v.size() == 60);

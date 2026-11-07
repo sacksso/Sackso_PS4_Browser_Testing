@@ -272,7 +272,7 @@ static std::string titleFromUrl(const std::string& url) {
     std::string n = sl == std::string::npos ? path : path.substr(sl + 1);
     return n.empty() ? url : n;
 }
-struct VidItem { std::string url, note; };
+struct VidItem { std::string url, note; bool preview = false; int score = 0; };
 static std::vector<VidItem> g_lastVids;   // videos encontrados en el HTML de la ultima pagina web
 static std::string g_lastVidsPage;
 static std::string g_navReferer;          // pagina desde la que se navego (Referer para videos/descargas)
@@ -312,6 +312,20 @@ static void closeVideo() {
     g_dirty = true;
 }
 
+// Clasifica una URL de video: las vistas previas (clips de 10 s que salen al pasar el raton por las miniaturas) se mandan al final y
+// se avisa; se prefieren las que indican calidad (1080/720/480...). Mayor puntuacion = mejor candidato al video completo.
+static int vidScore(const std::string& url, bool& preview) {
+    const std::string path = lowerStr(url.substr(0, url.find_first_of("?#")));
+    static const char* pv[] = {"preview", "thumb", "trailer", "teaser", "hover", "/td.", "_td.", "-td.", "/tn.", "_tn."};
+    preview = false;
+    for (const char* t : pv) if (path.find(t) != std::string::npos) { preview = true; break; }
+    int sc = 0;
+    if (preview) sc -= 20;
+    static const struct { const char* t; int v; } q[] = {{"2160", 7}, {"1440", 6}, {"1080", 5}, {"720", 4}, {"480", 3}, {"360", 2}, {"240", 1}};
+    for (const auto& e : q) if (path.find(e.t) != std::string::npos) { sc += e.v; break; }
+    if (endsWithStr(path, ".m3u8") || endsWithStr(path, ".webm")) sc -= 1;  // el reproductor de la PS4 probablemente no los lea
+    return sc;
+}
 // Busca a mano URLs de video en el HTML CRUDO (muchos sitios las dejan dentro de JavaScript/JSON, no en <video>).
 static void scanVideos(const std::string& html, const std::string& base, std::vector<VidItem>& out) {
     out.clear();
@@ -351,9 +365,15 @@ static void scanVideos(const std::string& html, const std::string& base, std::ve
             const std::string full = urlResolve(base, c2);
             if (!urlIsHttp(full) || seen.count(full)) continue;
             seen[full] = true;
-            out.push_back({full, videoNote(full)});
+            VidItem it;
+            it.url = full;
+            it.note = videoNote(full);
+            it.score = vidScore(full, it.preview);
+            if (it.preview) it.note = (it.note.empty() ? std::string() : it.note + "; ") + "parece una VISTA PREVIA (clip corto), no el video completo";
+            out.push_back(it);
         }
     }
+    std::stable_sort(out.begin(), out.end(), [](const VidItem& a, const VidItem& b) { return a.score > b.score; });  // mejores primero
 }
 static void captureVideos(const std::string& html, const std::string& base) {
     std::vector<VidItem> v;
@@ -361,7 +381,10 @@ static void captureVideos(const std::string& html, const std::string& base) {
     if (v.empty()) return;
     g_lastVids.swap(v);
     g_lastVidsPage = base;
-    toast(std::to_string(g_lastVids.size()) + (g_lastVids.size() == 1 ? " video detectado (F8)" : " videos detectados (F8)"));
+    bool allPrev = true;
+    for (const VidItem& it : g_lastVids) if (!it.preview) { allPrev = false; break; }
+    if (allPrev) toast(std::to_string(g_lastVids.size()) + " clips de vista previa (parece un listado): abre la pagina del video y pulsa F8");
+    else toast(std::to_string(g_lastVids.size()) + (g_lastVids.size() == 1 ? " video detectado (F8)" : " videos detectados (F8)"));
 }
 static std::string genHome() {
     std::string h =
@@ -528,7 +551,11 @@ static std::string genVideos() {
         h += "<p>No se detectaron videos: abre una pagina con videos y vuelve aqui (F8). Se buscan direcciones .mp4, .m3u8 y .webm en el codigo de la pagina, "
              "incluso las que estan dentro de JavaScript.</p>";
     } else {
-        h += "<p>" + htmlEscape(g_lastVidsPage) + "</p><p>Reproducir ve el video sin descargarlo (solo MP4 con H.264/AAC es seguro); Descargar lo guarda.</p><ul>";
+        h += "<p>" + htmlEscape(g_lastVidsPage) + "</p><p>Reproducir ve el video sin descargarlo (solo MP4 con H.264/AAC es seguro); Descargar lo guarda.</p>";
+        bool allPrev = true;
+        for (const VidItem& it : g_lastVids) if (!it.preview) { allPrev = false; break; }
+        if (allPrev) h += "<p><b>Esta pagina parece un listado:</b> todo lo encontrado son vistas previas de unos 10 s. Abre la pagina del video que quieres ver y pulsa F8 alli.</p>";
+        h += "<ul>";
         for (size_t i = 0; i < g_lastVids.size(); i++) {
             std::string label = g_lastVids[i].url;
             if (label.size() > 110) label = label.substr(0, 107) + "...";
@@ -1805,10 +1832,11 @@ static void drawVideoUi(Canvas& cv) {
         }
     }
     if (g_vpStats) {
-        char l1[200], l2[200];
-        snprintf(l1, sizeof(l1), "Video %dx%d   %.1f fps   fotogramas: %lu", vi.vw, vi.vh, vi.fps, vi.frames);
+        char l1[240], l2[200];
+        snprintf(l1, sizeof(l1), "Video %dx%d   %.1f fps   velocidad %.2fx   fotogramas: %lu (descartados %lu)   conv. %.1f ms   reloj: %s", vi.vw, vi.vh, vi.fps,
+                 vi.speed, vi.frames, vi.dropped, vi.convMs, vi.clockSync ? "pared" : "audio");
         snprintf(l2, sizeof(l2), "Decodificador: %s   audio: %s   bufer: %d%%", vi.vdec == 0 ? "sistema" : (vi.vdec == 2 ? "software" : "software 2"), vi.hasAudio ? "si" : "no", vi.bufPct);
-        cv.rrect(40, 90, 900, 120, 10, 0xB0000000);
+        cv.rrect(40, 90, 1300, 120, 10, 0xB0000000);
         te_draw(cv, 60, 126, l1, FONT_SANS, 19, false, 0xFFFFFFFF);
         te_draw(cv, 60, 156, l2, FONT_SANS, 19, false, 0xFFFFFFFF);
         te_draw(cv, 60, 186, te_fit("Estado: " + vi.stage, 860, FONT_SANS, 19, false), FONT_SANS, 19, false, 0xFFCCCCCC);
@@ -1920,7 +1948,7 @@ static void quitClick() {
 static void hardExit() {
     psb_log("[quit] saliendo");
     std::thread([] { SDL_Delay(2500); psb_log("[quit] salida forzada por el vigilante"); _exit(0); }).detach();
-    if (vp_active()) vp_close();
+    vp_shutdown();  // cierra video (si lo hay), puerto de audio y texturas, y lo deja registrado
     imgw_pause(true);
     psb_log("[quit] adios");
     _exit(0);
@@ -1961,7 +1989,7 @@ static void drawFrame() {
     if (g_quitAsk) drawQuit(cv);
 }
 static void renderFrame() {
-    SDL_RenderClear(g_ren);
+    // sin SDL_RenderClear: la textura cubre toda la pantalla y sin mezcla alfa, asi que limpiar antes es un relleno de 8 MB de mas
     SDL_RenderCopy(g_ren, g_tex, nullptr, nullptr);
     if (g_mouseOk && g_curTex) {
         SDL_Rect dst = {g_mx, g_my, 12 * 2, 17 * 2};
@@ -2213,7 +2241,7 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.8.0 ==");
+    psb_log("== psbrowser v0.8.1 ==");
     configLoad();
     bookmarksLoad();
     dlListLoad();
@@ -2469,11 +2497,16 @@ int main(int, char**) {
             drawFrame();
             const uint32_t t1 = SDL_GetTicks();
             SDL_UpdateTexture(g_tex, nullptr, cv.px.data(), W * 4);
+            const uint32_t t1b = SDL_GetTicks();
             renderFrame();
             const uint32_t t2 = SDL_GetTicks();
             g_dirty = false;
-            static int perf = 0;
+            static int perf = 0, vperf = 0;
             if (perf < 40) { perf++; psb_log("[perf] dibujo=%u ms, subida+presentacion=%u ms (frame %d)", t1 - t0, t2 - t1, perf); }
+            if (g_vpMode && vperf < 90 && (vperf < 30 || vperf % 5 == 0)) {  // en video: dibujo / UpdateTexture / RenderCopy+Present por separado (reloj SDL_GetTicks)
+                psb_log("[perfv] t=%u ms dibujo=%u subida=%u presentacion=%u (total %u ms)", t2, t1 - t0, t1b - t1, t2 - t1b, t2 - t0);
+            }
+            if (g_vpMode) vperf++;
         } else if (moved) {
             renderFrame();
         }

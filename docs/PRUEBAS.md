@@ -101,3 +101,11 @@ Instala el PKG y manda `/data/psbrowser/log.txt` (las lineas `[vp]` son las impo
 4. **Videos de la pagina:** F8 o menu > "Videos de la pagina" (aviso "N videos detectados" al cargar). Prueba en una pagina con `<video>` y en una que guarde el .mp4 dentro de JavaScript.
 5. **Controles:** mando X pausa, O cierra, cruceta izq/der -+10 s, arriba/abajo volumen, botones 4/5 -+30 s, 3 informacion, 2 calidad. Teclado: Espacio/K, flechas, J/L (-+30 s), Inicio, H (calidad), I (informacion), Esc/Q cierran. Raton: clic en la barra = saltar, botones, rueda = volumen.
 6. Si no hay imagen: Configuracion > Decodificador (sistema / software / software 2) y repite; manda `video_frame0.bin` y las lineas `[vp] PRIMER FOTOGRAMA`. Anota los fps de `I` (el dibujo completo a 1920x1080 limita a ~15 fps; `H` = media resolucion ayuda).
+
+## Prueba v0.8.1: sincronizacion de video, cierre y F8 (sin probar en PS4)
+Instala el PKG y manda `/data/psbrowser/log.txt` (lineas `[vp]`, `[perfv]`, `[quit]`, `[video]`) y `config.txt`.
+1. **Cámara lenta:** reproduce un clip corto sin audio (una vista previa de F8 vale). Mira en el log `[vp] … fps mostrados | velocidad Nx …`: ~1.0x = bien (con `descartados` > 0 es normal: se ven menos fps pero a ritmo real); ~0.5x = el arreglo no bastó. Tecla **I** (o boton 3) muestra lo mismo en pantalla.
+2. **Video con audio:** abre un `.mp4` completo con sonido (p. ej. uno de `about:downloads` con [ Reproducir ]). Anota si hay camara lenta, si el sonido va a ritmo y si la imagen y el audio se desincronizan; en el log, `reloj=audio`.
+3. **Cierre:** (a) tras ver un video, sal con el **boton Salir de la app** (apagado de la barra, Ctrl+Q) y comprueba que el log termina con `[vp] cerrado limpio`, `[quit] adios`; (b) otra sesion: sal desde el menu de PS (boton PS > Cerrar aplicacion) **sin haber abierto ningun video**, y (c) tras ver un video. Anota el codigo **CE-xxxxx-x** si la PS4 muestra un error y en cuales de los casos sale.
+4. **F8 en un listado:** abre una pagina de listado/playlist y pulsa F8: deberia avisar de que son vistas previas y dejarlas al final; abre la pagina de UN video y pulsa F8: deberia aparecer primero el de mayor calidad.
+

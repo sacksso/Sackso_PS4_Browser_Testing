@@ -5,7 +5,7 @@ JavaScript moderno). Mientras tanto, el repo avanza por fases pequeñas que se p
 
 > Uso personal / aprendizaje. Reutiliza el toolchain y el CI que ya funcionaron en el proyecto de Ren'Py para PS4.
 
-## Estado actual: v0.7.0 (**sin probar en PS4**): menú contextual (clic derecho), copiar enlaces/URL, más atajos, descargas con escritura a disco en hilo aparte y log de velocidad, iconos .ico e imágenes perezosas (`data-src`). La v0.6.0 (descargas) ya se probó en consola: funciona. Ver `docs/CONTEXTO.md` y, para JavaScript, `docs/JS.md`.
+## Estado actual: v0.8.1 (**sin probar en PS4**; v0.8.0 ya reproduce vídeo en consola con AvPlayer, pero a ~12 fps y con crash al cerrar desde el menú de PS): sincronización de vídeo por reloj de pared, cierre más limpio y clasificación de vídeos en F8. Antes, v0.7.0 (**sin probar en PS4**): menú contextual (clic derecho), copiar enlaces/URL, más atajos, descargas con escritura a disco en hilo aparte y log de velocidad, iconos .ico e imágenes perezosas (`data-src`). La v0.6.0 (descargas) ya se probó en consola: funciona. Ver `docs/CONTEXTO.md` y, para JavaScript, `docs/JS.md`.
 
 Descargas (v0.6.0): abrir un enlace a un archivo, imagen o `.mp4` muestra una página de confirmación; **Descargar** guarda en `/data/psbrowser/downloads/` con barra de progreso (cancelar = botón O). `about:downloads` (Ctrl+J) lista y borra; `about:images` lista las imágenes de la última página. No resuelve Cloudflare/captcha (sin JavaScript).
 
