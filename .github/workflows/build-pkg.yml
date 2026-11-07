@@ -120,7 +120,7 @@ jobs:
             -e 's/^TITLE_ID +:=.*/TITLE_ID    := PSBR00001/' \
             -e 's/^CONTENT_ID +:=.*/CONTENT_ID  := IV0000-PSBR00001_00-PSBROWSER0000000/' \
             -e 's/^COMMONFILES +:=.*/COMMONFILES :=/' \
-            -e 's/^(LIBS +:=.*)$/\1 -lSceNet -lSceSsl -lSceHttp -lSceKeyboard/' \
+            -e 's/^(LIBS +:=.*)$/\1 -lSceNet -lSceSsl -lSceHttp -lSceKeyboard -lSceAvPlayer -lSceAudioOut -lSceUserService/' \
             "$work/Makefile"
           # -O2: sin optimizacion el dibujo del lienzo (bucles por pixel) era ~5-10x mas lento (v0.4.1 compilaba sin -O).
           extra="-O2"
