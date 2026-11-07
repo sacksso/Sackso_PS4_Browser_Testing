@@ -45,5 +45,8 @@ void vp_seek_abs(uint64_t ms);
 void vp_volume_rel(int deltaPct);
 // Hilo principal, una vez por vuelta del bucle: recoge el siguiente fotograma si hay uno nuevo (true = imagen nueva).
 bool vp_update();
+// Ultimo fotograma ARGB (solo hilo principal): devuelve el puntero (nullptr si aun no hay) y su tamano; serial cambia con cada fotograma nuevo.
+// Sirve para subirlo como textura de SDL a su tamano nativo y dejar que SDL lo escale (via rapida, sin componer toda la pantalla).
+const uint32_t* vp_frame(int& w, int& h, unsigned long& serial);
 // Dibuja el ultimo fotograma escalado a (x,y,w,h) (el llamador calcula el recuadro con la proporcion). half = mitad de resolucion (mas rapido).
 void vp_draw_video(Canvas& cv, int x, int y, int w, int h, bool half);

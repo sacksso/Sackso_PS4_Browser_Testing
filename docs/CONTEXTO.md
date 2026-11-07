@@ -1,7 +1,38 @@
 # Contexto del proyecto psbrowser (para continuar en otro chat o con otra IA)
 
 > Pega este documento al inicio de una conversación nueva junto con el zip del repo (y, si los tienes, el último `log.txt` y el zip `logs` del CI). Idioma de trabajo: **español**.
-> Última actualización: 7 de noviembre de 2026, noche (**v0.8.1 = v0.8.0 + sincronización de vídeo por reloj de pared + cierre más limpio + clasificación de vídeos en F8; compila con stubs y pasa pruebas en PC, SIN PROBAR en PS4 ni compilada con el toolchain real**). v0.8.0 SÍ se probó en PS4 (vídeo funciona, ~12 fps / cámara lenta, crash al cerrar desde el menú de PS4). **JavaScript: aún no existe** (`docs/JS.md`).
+> Última actualización: 7 de noviembre de 2026, noche (**v0.8.2 = v0.8.1 + vía rápida de vídeo con textura nativa; sin probar en PS4**). El último log recibido es de **v0.8.0** (su primera línea dice `== psbrowser v0.8.0 ==`): v0.8.1 y v0.8.2 NO se han probado todavía. **JavaScript: aún no existe** (`docs/JS.md`).
+
+---
+# >>> ESTADO v0.8.2 (VIA RAPIDA DE VIDEO) - SIN PROBAR EN PS4 - leer primero <<<
+> 7-nov-2026 (noche, 2.º envío). El usuario dijo «el vídeo va mal incluso descargándolo primero» y subió `log_1.txt`, `logs__20_.zip` (CI), `video_frame0_1.bin`, etc. **Ese log es de v0.8.0** (línea 1: `== psbrowser v0.8.0 ==`; no hay líneas `[perfv]` ni `velocidad`): o no instaló v0.8.1, o el CI compiló el repo antiguo. **Pedirle que confirme que la primera línea del log diga v0.8.2.**
+
+## Lo que enseña ese log (v0.8.0, vídeo CON audio)
+- `14057500-480p.mp4`: **864x480**, AUDIO 2 canales **44100 Hz** (se remuestrea a 48000), 188 s; `PRIMER FOTOGRAMA: width=864 height=480 pitch=896 crop(R44) fps=0 aspecto=1.002`. Mismo resultado **por streaming y desde `/data/psbrowser/downloads/`** → **no es la red ni el disco**.
+- **Con audio NO hay cámara lenta:** `pos` avanza ~2000 ms por cada línea de 2 s de pared (reloj de audio del AvPlayer) y los fps mostrados son **10,4–14 con un vídeo de ~24–30 fps** → va **entrecortado**, no lento. Cuello = coste por vuelta ≈ 85–95 ms: `[perf]` de la interfaz = dibujo 6–8 ms + **subida+presentación 53–56 ms** (fijo, medido también en 0.5.0) + conversión NV12→ARGB y escalado CPU a 1920×1080. Encaja con ~11 fps.
+- Los clips sin audio (v0.8.0, log anterior) sí iban a 0,5x; la sincronización por reloj de pared de v0.8.1 es para ese caso.
+- **`11258651-4k.mp4` por streaming: `sceAvPlayerStreamCount = 0` tras 40 s** → «No se encontraron pistas». El log muestra una petición de **1 MB cada ~3 s con un TLS nuevo por petición** (~350 KB/s): o el AvPlayer no soporta ese vídeo (4K/HEVC probable), o la cabecera `moov` está al final y el streaming secuencial no llega a tiempo. **Sin diagnosticar.** Pendiente: reutilizar la conexión en `vsource`/`netclient` (keep-alive) o pedir bloques mayores; probar si 4K no entra aunque se descargue.
+- `sceAudioOutOpen` devuelve 536870919/536870918 según la vez (puertos distintos, sin error); `sceAudioOutInit` = 0x8026000E en 2.ª llamada (inofensivo).
+
+## Qué cambia en v0.8.2
+**Vía rápida de presentación (`presentVideoFast`, `vpCleanPlayback` en `main.cpp`; `vp_frame()` en `vplayer.*`):** cuando el vídeo se reproduce sin nada encima (estado PLAYING, overlay oculto, sin mensajes, sin toast, sin diálogo de salida, sin panel de estadísticas) el fotograma ARGB se sube como **textura de SDL del tamaño nativo del vídeo** (p. ej. 864×480 = 1,6 MB en vez de componer y subir 8 MB) y `SDL_RenderCopy` lo escala con letterbox; el fondo negro solo se limpia en el primer fotograma de la vía rápida (siempre, si hay ratón conectado, para borrar el cursor). Con overlay/mensajes visibles se usa la vía normal de v0.8.1 (más lenta). **Hipótesis a verificar:** que el coste fijo de ~55 ms sea sobre todo `UpdateTexture(8 MB)`+`RenderClear`+`RenderCopy` de pantalla completa y no `SDL_RenderPresent` en sí (si lo fuera, la vía rápida casi no mejora y habría que mirar `[perfv]` y plantearse otra salida: p. ej. bajar la resolución de la ventana en modo vídeo). Log nuevo: **`[perfv] RAPIDO t=… subida=… presentacion=… (total … ms)`** y `[perfv] textura de video nativa WxH`. Si `total` baja de ~40 ms, ya se pasa de 15 fps.
+Compila con stubs (`SDL_DestroyTexture` y `SDL_SetRenderDrawColor` añadidos a `tools/stubs/SDL2/SDL.h`); **no probado en consola**.
+
+## Pendiente
+1. Instalar v0.8.2, confirmar la versión en la 1.ª línea del log y devolver `log.txt`: `[perfv] RAPIDO`, `[vp] … velocidad`, fps con vídeo con audio y sin audio; cierre por Salir y por menú de PS (código CE si hay crash).
+2. Si sigue por debajo de ~20 fps: acelerar conversión NV12→ARGB (la conversión se mide: `conversion N ms` en la línea `[vp]`) y/o reducir el coste de presentación a pantalla completa.
+3. 4K/streaming lento: keep-alive en `netclient` para los rangos; comprobar límites del AvPlayer.
+4. El resto del bloque v0.8.1 de abajo sigue vigente (cierre, F8, duración en la lista, HLS, servidor remoto).
+
+## Git (v0.8.2)
+Cambiados: `app/main.cpp`, `app/vplayer.cpp`, `app/vplayer.h`, `tools/stubs/SDL2/SDL.h`, `docs/CONTEXTO.md`, `docs/PRUEBAS.md`, `README.md` (más todo lo de v0.8.1 si aún no lo subió: `app/vsync.h`, `tools/tests/…`). El workflow NO cambia.
+```bash
+cd Sackso_PS4_Browser_Testing-main
+git add -A app docs tools README.md
+git commit -m "v0.8.2: via rapida de video (textura nativa), sincronizacion por reloj de pared, cierre mas limpio, F8 clasifica"
+git push
+```
+Después: Actions → **Build PKG** → *Run workflow* → instalar → mirar que el log empiece por `== psbrowser v0.8.2 ==`.
 
 ---
 # >>> ESTADO v0.8.1 (SINCRONIZACION DE VIDEO + CIERRE + F8) - SIN PROBAR EN PS4 - leer primero <<<
@@ -124,6 +155,7 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 | **0.7.0** | 0.6.0 + **menú contextual** (clic derecho), portapapeles interno, atajos, **escritura a disco en hilo aparte** + log de velocidad `[dl]`, **decodificador .ico**, imágenes perezosas (`data-src`…), log del ratón sin spam, **sonda de QuickJS en el CI** | **Sin probar en PS4.** Compila con stubs; `AsyncWriter` e `icodec` pasan pruebas en PC (ASan/UBSan). Es el siguiente PKG a instalar |
 | **0.8.0** | 0.7.0 + **reproductor de video** (libSceAvPlayer, streaming por rangos o archivo descargado), **boton/dialogo Salir**, `about:videos` (F8), ajustes de video | **Probada en PS4 (log de 1535 líneas):** el vídeo reproduce (primer fotograma bien, color correcto), pero ~12 fps / cámara lenta; crash al cerrar desde el menú de PS4 tras reproducir; botón Salir y entradas de vídeo sin confirmar |
 | **0.8.1** | 0.8.0 + sincronización de vídeo por reloj de pared (solo sin audio), cierre del reproductor más limpio, clasificación de vistas previas en F8, logs `[perfv]` y velocidad real | **Sin probar en PS4** (compila con stubs; `vsync` y `scanVideos` probados en PC). Es el siguiente PKG a instalar |
+| **0.8.2** | 0.8.1 + vía rápida de vídeo (textura nativa escalada por SDL cuando no hay overlay) | **Sin probar en PS4.** Siguiente PKG a instalar (el log de v0.8.0 mostró ~11 fps con audio, entrecortado, por el coste de presentar 1920×1080) |
 
 ## 4. Resultados de las pruebas en PS4 real
 ### Prueba v0.5.0 (log de 1092 líneas)

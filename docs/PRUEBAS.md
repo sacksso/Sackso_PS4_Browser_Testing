@@ -109,3 +109,10 @@ Instala el PKG y manda `/data/psbrowser/log.txt` (lineas `[vp]`, `[perfv]`, `[qu
 3. **Cierre:** (a) tras ver un video, sal con el **boton Salir de la app** (apagado de la barra, Ctrl+Q) y comprueba que el log termina con `[vp] cerrado limpio`, `[quit] adios`; (b) otra sesion: sal desde el menu de PS (boton PS > Cerrar aplicacion) **sin haber abierto ningun video**, y (c) tras ver un video. Anota el codigo **CE-xxxxx-x** si la PS4 muestra un error y en cuales de los casos sale.
 4. **F8 en un listado:** abre una pagina de listado/playlist y pulsa F8: deberia avisar de que son vistas previas y dejarlas al final; abre la pagina de UN video y pulsa F8: deberia aparecer primero el de mayor calidad.
 
+## Prueba v0.8.2: via rapida de video (sin probar en PS4)
+Antes de nada: la **primera linea del log debe decir `== psbrowser v0.8.2 ==`** (el ultimo log recibido era de v0.8.0).
+1. Reproduce el mismo `14057500-480p.mp4` (con audio). Con el overlay oculto (espera 3 s sin tocar nada) deberia verse mas fluido; en el log mira `[perfv] RAPIDO … total N ms` (objetivo < 40 ms) y los fps de `[vp]`.
+2. Mueve el raton / pulsa un boton: aparece el overlay (via normal, mas lenta); al ocultarse vuelve la rapida. Comprueba que no quedan restos del cursor ni del overlay en las bandas negras.
+3. Pausa, +-10 s, volumen y cerrar con O deben seguir funcionando; anota si hay parpadeos al cambiar entre las dos vias.
+4. Cierre (Salir de la app y menu de PS) y codigo CE si falla, como en v0.8.1.
+

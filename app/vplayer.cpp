@@ -667,6 +667,12 @@ bool vp_update() {
     return vpCountFrame(now, ts);
 }
 
+const uint32_t* vp_frame(int& w, int& h, unsigned long& serial) {
+    w = P.argbW; h = P.argbH; serial = P.frames;
+    if (P.argb.empty() || w <= 0 || h <= 0 || static_cast<int>(P.argb.size()) < w * h) return nullptr;
+    return P.argb.data();
+}
+
 void vp_draw_video(Canvas& cv, int x, int y, int w, int h, bool half) {
     if (P.argb.empty() || P.argbW <= 0 || w <= 0 || h <= 0) return;
     const int sw = P.argbW, sh = P.argbH;

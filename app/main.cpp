@@ -1997,6 +1997,54 @@ static void renderFrame() {
     }
     SDL_RenderPresent(g_ren);
 }
+// Via rapida de video (solo cuando no hay nada que dibujar encima: overlay oculto, sin mensajes ni avisos): el fotograma se sube como textura
+// a su tamano NATIVO (p. ej. 864x480 = 1,6 MB en vez de 8 MB) y SDL lo escala con RenderCopy; se evita componer 1920x1080 en CPU y subirlos.
+static SDL_Texture* g_vidTex = nullptr;
+static int g_vidTexW = 0, g_vidTexH = 0;
+static unsigned long g_vidSerial = 0;
+static bool g_vidFastPrev = false;  // el ultimo frame presentado fue por la via rapida (las bandas negras ya estan pintadas)
+static void vidTexFree() {
+    if (g_vidTex) { SDL_DestroyTexture(g_vidTex); g_vidTex = nullptr; }
+    g_vidTexW = g_vidTexH = 0; g_vidSerial = 0; g_vidFastPrev = false;
+}
+static bool vpCleanPlayback(uint32_t now) {
+    if (!g_vpMode || g_quitAsk || !g_toast.empty()) return false;
+    const VpInfo vi = vp_info();
+    if (vi.state != VP_PLAYING || vi.netWait || vi.frames == 0 || vi.noFrameSecs >= 8) return false;
+    return !vpOverlayVisible(now, vi);
+}
+// true = presentado por la via rapida; false = usar la via normal (componer en el lienzo)
+static bool presentVideoFast(uint32_t* tUp, uint32_t* tPres) {
+    int w = 0, h = 0;
+    unsigned long serial = 0;
+    const uint32_t* px = vp_frame(w, h, serial);
+    if (!px) return false;
+    if (!g_vidTex || g_vidTexW != w || g_vidTexH != h) {
+        vidTexFree();
+        g_vidTex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+        if (!g_vidTex) { psb_log("[perfv] no se pudo crear la textura de video %dx%d: via normal", w, h); return false; }
+        g_vidTexW = w; g_vidTexH = h; g_vidSerial = 0;
+        psb_log("[perfv] textura de video nativa %dx%d (via rapida)", w, h);
+    }
+    const uint32_t a = SDL_GetTicks();
+    if (serial != g_vidSerial) { SDL_UpdateTexture(g_vidTex, nullptr, px, w * 4); g_vidSerial = serial; }
+    const uint32_t b = SDL_GetTicks();
+    int dw = W, dh = H;
+    if (static_cast<int64_t>(W) * h > static_cast<int64_t>(H) * w) dw = static_cast<int>(static_cast<int64_t>(H) * w / h);
+    else dh = static_cast<int>(static_cast<int64_t>(W) * h / w);
+    const SDL_Rect dst = {(W - dw) / 2, (H - dh) / 2, dw, dh};
+    if (!g_vidFastPrev || g_mouseOk) { SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255); SDL_RenderClear(g_ren); }  // bandas negras (y borra el cursor)
+    SDL_RenderCopy(g_ren, g_vidTex, nullptr, &dst);
+    if (g_mouseOk && g_curTex) {
+        SDL_Rect cd = {g_mx, g_my, 12 * 2, 17 * 2};
+        SDL_RenderCopy(g_ren, g_curTex, nullptr, &cd);
+    }
+    SDL_RenderPresent(g_ren);
+    g_vidFastPrev = true;
+    *tUp = b - a;
+    *tPres = SDL_GetTicks() - b;
+    return true;
+}
 static void present() {
     drawFrame();
     SDL_UpdateTexture(g_tex, nullptr, g_cv->px.data(), W * 4);
@@ -2241,7 +2289,7 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.8.1 ==");
+    psb_log("== psbrowser v0.8.2 ==");
     configLoad();
     bookmarksLoad();
     dlListLoad();
@@ -2479,7 +2527,7 @@ int main(int, char**) {
         if (g_toastUntil && now > g_toastUntil) { g_toastUntil = 0; g_toast.clear(); g_dirty = true; }
         if (now - lastPump > 120) { lastPump = now; if (!g_vpMode) pumpImages(); }
         if (g_vpMode) {  // fotogramas nuevos, cambios de estado y reloj del overlay
-            if (!vp_active()) { g_vpMode = false; imgw_pause(false); g_dirty = true; }
+            if (!vp_active()) { g_vpMode = false; vidTexFree(); imgw_pause(false); g_dirty = true; }
             else {
                 if (vp_update()) g_dirty = true;
                 const VpInfo vi = vp_info();
@@ -2492,7 +2540,15 @@ int main(int, char**) {
                 if (ov && now - lastClk > 250) { lastClk = now; g_dirty = true; }
             }
         }
-        if (g_dirty) {
+        uint32_t fUp = 0, fPres = 0;
+        const uint32_t fT0 = SDL_GetTicks();
+        if (g_dirty && vpCleanPlayback(now) && presentVideoFast(&fUp, &fPres)) {
+            g_dirty = false;
+            static int fperf = 0;
+            if (fperf < 90 && (fperf < 30 || fperf % 5 == 0)) psb_log("[perfv] RAPIDO t=%u ms subida=%u presentacion=%u (total %u ms)", SDL_GetTicks(), fUp, fPres, SDL_GetTicks() - fT0);
+            fperf++;
+        } else if (g_dirty) {
+            g_vidFastPrev = false;
             const uint32_t t0 = SDL_GetTicks();
             drawFrame();
             const uint32_t t1 = SDL_GetTicks();
