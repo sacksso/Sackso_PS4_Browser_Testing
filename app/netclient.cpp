@@ -202,7 +202,7 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
         out.received = 0;
         if (gate && !gate(out)) { out.stopped = true; ok = true; goto done; }  // solo cabeceras
         if (sink && !sink->begin(out)) { out.stage = "cancelado"; out.sceError = -2; goto done; }
-        std::vector<uint8_t> buf(32 * 1024);
+        std::vector<uint8_t> buf(sink ? 256 * 1024 : 32 * 1024);  // descargas: trozos grandes = menos llamadas a sceHttpReadData
         for (;;) {
             int n = sceHttpReadData(req, buf.data(), static_cast<uint32_t>(buf.size()));
             if (n < 0) { fail("readData", n); goto done; }

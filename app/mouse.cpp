@@ -119,13 +119,14 @@ bool psmouse_poll(PsMouseState* out) {
         uint8_t buf[64];
         std::memset(buf, 0, sizeof(buf));
         int n = sceMouseRead(g_handle, buf, 1);
-        if (n != g_lastRet) {  // solo se loguea cuando cambia el codigo de retorno
+        if (n != g_lastRet) {  // solo se loguea cuando cambia el codigo de retorno (y las primeras 12 veces: alterna 0/1 sin parar)
             g_lastRet = n;
-            L("sceMouseRead devuelve 0x%x", static_cast<unsigned>(n));
+            static int retLogs = 0;
+            if (retLogs < 12) { retLogs++; L("sceMouseRead devuelve 0x%x", static_cast<unsigned>(n)); }
         }
         if (n <= 0) break;
         const RawMouse* r = reinterpret_cast<const RawMouse*>(buf);
-        if (g_rawLogs < 10 || r->buttons != g_prevButtons) {
+        if (g_rawLogs < 10 || (r->buttons != g_prevButtons && g_rawLogs < 120)) {
             g_rawLogs++;
             dumpRaw(buf, 40);
             L("raton parseado: conectado=%d botones=0x%x x=%d y=%d rueda=%d", r->connected, r->buttons, r->x, r->y,

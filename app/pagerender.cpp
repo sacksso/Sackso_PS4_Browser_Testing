@@ -140,3 +140,20 @@ int hitFocus(const Document& d, const RenderCtx& rc, int mx, int my) {
     }
     return -1;
 }
+
+int hitImage(const Document& d, const RenderCtx& rc, int mx, int my) {
+    if (mx < rc.viewX || mx >= rc.viewX + rc.viewW || my < rc.viewY || my >= rc.viewY + rc.viewH) return -1;
+    const int docY = my - rc.viewY + rc.scroll;
+    const int li = firstVisibleLine(d, docY);
+    if (li >= static_cast<int>(d.lines.size())) return -1;
+    const DocLine& L = d.lines[li];
+    if (docY < L.y || docY >= L.y + L.h) return -1;
+    for (const Span& s : L.spans) {
+        if (s.kind != SK_IMAGE || s.ref < 0 || s.ref >= static_cast<int>(d.images.size())) continue;
+        const int sx = rc.contentLeft + s.x;
+        if (mx < sx || mx >= sx + s.w) continue;
+        const int top = L.baseline + L.y - s.h;
+        if (docY >= top && docY < top + s.h) return s.ref;
+    }
+    return -1;
+}

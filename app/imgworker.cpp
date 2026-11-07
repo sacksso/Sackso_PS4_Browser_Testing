@@ -9,6 +9,7 @@
 #include <mutex>
 #include <thread>
 
+#include "icodec.h"
 #include "log.h"
 #include "netclient.h"
 
@@ -34,16 +35,30 @@ bool g_started = false;
 std::atomic<bool> g_paused{false};
 
 // Escala (RGBA 8 bits) para que quepa en bw x bh conservando la proporcion: promedio por area al reducir, bilineal al ampliar.
-bool decode(const std::string& bytes, int bw, int bh, std::vector<uint32_t>& out, int& ow, int& oh) {
+bool decode(const std::string& bytesIn, int bw, int bh, std::vector<uint32_t>& out, int& ow, int& oh) {
     int w = 0, h = 0, n = 0;
-    if (!stbi_info_from_memory(reinterpret_cast<const unsigned char*>(bytes.data()), static_cast<int>(bytes.size()), &w, &h, &n)) return false;
-    if (w <= 0 || h <= 0 || static_cast<long long>(w) * h > 12LL * 1000 * 1000) {  // >12 Mpx: no cabe con seguridad en memoria
-        psb_log("[img] imagen demasiado grande (%dx%d), se omite", w, h);
-        return false;
+    const std::string* src = &bytesIn;
+    std::string icoPng;
+    std::vector<uint8_t> icoPix;
+    const unsigned char* d = nullptr;  // RGBA 8 bits
+    unsigned char* stbData = nullptr;
+    if (ico_looks_like(bytesIn)) {  // favicons (.ico): BMP interno o PNG interno
+        const int r = ico_extract(bytesIn, w, h, icoPix, icoPng);
+        if (r == 1) d = icoPix.data();
+        else if (r == 2) src = &icoPng;
+        else return false;
     }
-    unsigned char* d = stbi_load_from_memory(reinterpret_cast<const unsigned char*>(bytes.data()), static_cast<int>(bytes.size()), &w, &h, &n, 4);
-    if (!d) return false;
-    if (w <= 0 || h <= 0) { stbi_image_free(d); return false; }
+    if (!d) {
+        if (!stbi_info_from_memory(reinterpret_cast<const unsigned char*>(src->data()), static_cast<int>(src->size()), &w, &h, &n)) return false;
+        if (w <= 0 || h <= 0 || static_cast<long long>(w) * h > 12LL * 1000 * 1000) {  // >12 Mpx: no cabe con seguridad en memoria
+            psb_log("[img] imagen demasiado grande (%dx%d), se omite", w, h);
+            return false;
+        }
+        stbData = stbi_load_from_memory(reinterpret_cast<const unsigned char*>(src->data()), static_cast<int>(src->size()), &w, &h, &n, 4);
+        if (!stbData) return false;
+        d = stbData;
+    }
+    if (w <= 0 || h <= 0) { if (stbData) stbi_image_free(stbData); return false; }
     const float s = std::min(static_cast<float>(bw) / w, static_cast<float>(bh) / h);
     ow = std::max(1, static_cast<int>(std::lround(w * s)));
     oh = std::max(1, static_cast<int>(std::lround(h * s)));
@@ -70,7 +85,7 @@ bool decode(const std::string& bytes, int bw, int bh, std::vector<uint32_t>& out
             out[static_cast<size_t>(y) * ow + x] = ((a / cnt) << 24) | ((r / cnt) << 16) | ((g / cnt) << 8) | (b / cnt);
         }
     }
-    stbi_image_free(d);
+    if (stbData) stbi_image_free(stbData);
     return true;
 }
 

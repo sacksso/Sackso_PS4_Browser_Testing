@@ -18,3 +18,12 @@ g++ -std=c++17 -fsanitize=address,undefined -Iapp tools/tests/test_download.cpp 
 g++ -std=c++17 -fsanitize=address,undefined -Itools/stubs -Iapp tools/tests/test_netclient_mock.cpp app/netclient.cpp app/inflate.cpp app/charset.cpp -o /tmp/test_nc && /tmp/test_nc
 ```
 Esto NO sustituye al CI ni a la consola: `mouse.cpp` y `textengine.cpp` necesitan mas stubs y no se comprueban asi.
+
+# Pruebas en PC añadidas en v0.7.0
+```
+# escritura a disco en hilo aparte (integridad, contrapresion, abort, /dev/full)
+g++ -std=c++17 -pthread -fsanitize=address,undefined -Itools/stubs -Iapp tools/tests/test_asyncwriter.cpp app/asyncwriter.cpp -o /tmp/test_aw && /tmp/test_aw
+# iconos .ico (BMP 1/4/8/24/32 bits, PNG interno, fuzz): necesita Pillow para generar los casos
+g++ -std=c++17 -fsanitize=address,undefined -Iapp tools/tests/test_ico.cpp app/icodec.cpp -o /tmp/test_ico   # lo invoca tools/tests/ico_test.py
+python3 -I tools/tests/ico_test.py
+```

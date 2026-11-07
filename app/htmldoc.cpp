@@ -699,7 +699,29 @@ Document parseHtml(const std::string& html, int width, int zoomPct) {
         if (name == "img") {
             if (closing) continue;
             std::string src, alt;
-            if (!getAttr(attrs, "src", src)) { if (!getAttr(attrs, "data-src", src)) getAttr(attrs, "data-lazy-src", src); }
+            // Imagenes "perezosas": el src real suele ir en data-src/data-original... y src es un marcador (data: o gif vacio).
+            {
+                getAttr(attrs, "src", src);
+                const std::string ls = lowerStr(src);
+                const bool placeholder = src.empty() || ls.compare(0, 5, "data:") == 0 || ls.find("blank") != std::string::npos ||
+                                         ls.find("pixel") != std::string::npos || ls.find("spacer") != std::string::npos ||
+                                         ls.find("placeholder") != std::string::npos || ls.find("lazy") != std::string::npos ||
+                                         ls.find("transparent") != std::string::npos || ls.find("1x1") != std::string::npos;
+                if (placeholder) {
+                    static const char* lazy[] = {"data-src", "data-original", "data-lazy-src", "data-lazy", "data-url", "data-echo", "data-thumb"};
+                    for (const char* a : lazy) {
+                        std::string v;
+                        if (getAttr(attrs, a, v) && !v.empty() && v.compare(0, 5, "data:") != 0) { src = v; break; }
+                    }
+                    if (src.empty() || src.compare(0, 5, "data:") == 0) {  // srcset / data-srcset: primera URL
+                        std::string ss;
+                        if ((getAttr(attrs, "data-srcset", ss) || getAttr(attrs, "srcset", ss)) && !ss.empty()) {
+                            size_t b0 = ss.find_first_not_of(" \t\r\n"), e0 = ss.find_first_of(" \t\r\n,", b0 == std::string::npos ? 0 : b0);
+                            if (b0 != std::string::npos) src = ss.substr(b0, e0 == std::string::npos ? std::string::npos : e0 - b0);
+                        }
+                    }
+                }
+            }
             getAttr(attrs, "alt", alt);
             alt = collapseWs(alt);
             int w = attrInt(attrs, "width"), h = attrInt(attrs, "height");

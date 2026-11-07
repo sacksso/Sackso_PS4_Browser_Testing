@@ -79,3 +79,16 @@ Instala el PKG y devuelve `/data/psbrowser/log.txt` (busca lineas `[dl]`, `[http
 6. **Errores:** enlace roto (404), descarga detras de Cloudflare/captcha (403/503 o una pagina HTML en vez del archivo): debe salir "Descarga fallida" con la causa y [ Reintentar ].
 7. `about:downloads` (o Ctrl+J con teclado): `[ borrar ]` borra el archivo de verdad.
 Cosas que no se pueden saber sin consola: velocidad real, disco lleno, si `rename` funciona en `/data`, si el servidor corta sin `Content-Length`.
+
+## Prueba v0.7.0: menu contextual, portapapeles, atajos, descargas con hilo de disco, ICO (sin probar en PS4)
+Instala el PKG y devuelve `/data/psbrowser/log.txt` + el zip `logs` del CI (ahora incluye `quickjs_probe.txt`, la sonda de JavaScript).
+1. **Clic derecho (raton):** sobre un enlace -> "Abrir enlace / Abrir en pestana nueva / Copiar direccion del enlace / Descargar enlace" + Atras/Adelante/Recargar... Sobre una imagen -> "Abrir imagen / Copiar direccion de la imagen / Guardar imagen". Sobre una pestana -> duplicar/cerrar/cerrar las demas/reabrir. Sobre la barra de direcciones -> copiar/pegar y buscar. Flechas o raton para elegir; Enter/clic ejecuta; Esc/clic fuera cierra. (**Cambio:** el clic derecho ya no es "atras"; Atras esta en el menu, y los botones laterales del raton hacen atras/adelante si existen.)
+2. **Copiar/pegar:** copia un enlace, abre pestana nueva (Ctrl+T) y pega con Ctrl+V en la barra. Ctrl+C sin editar copia el enlace seleccionado (Tab) o la URL de la pagina. El portapapeles es **interno** (la PS4 no da acceso al del sistema); tambien queda en `/data/psbrowser/clipboard.txt`.
+3. **Atajos:** Ctrl+R, Ctrl+Mayus+T (reabrir pestana cerrada), Ctrl+1..9, Alt+Inicio, tecla Menu o Mayus+F10 (menu del elemento con foco), Ctrl+clic (pestana nueva), Alt+clic (descargar enlace).
+4. **Mando:** el boton **11** abre el menu del elemento con foco (cruceta mueve, X elige, O cierra). **Dime si el boton 11 es R3/L3 o el que sea**: era el unico sin funcion y asi lo elegimos; si molesta (se pulsa sin querer al mover el stick), lo cambio.
+5. **Descargas (velocidad):** descarga un archivo grande (p. ej. el .pkg de archive.org). En `log.txt` busca `[dl]`: cada 5 s sale `X MB de Y, N MB/s (media M MB/s), cola de disco K KB` y al final `[dl] red: ... MB/s | disco tras la red: ... ms`.
+   - Si "cola de disco" crece hasta ~12 MB y la velocidad es baja -> el cuello es el **disco**.
+   - Si la cola esta casi vacia -> el cuello es **red/TLS/servidor** (archive.org limita por conexion; ahi la solucion seria varias conexiones en paralelo).
+6. **Favicons .ico:** en el log ya no deben salir `no se pudo decodificar (image/x-icon...)`.
+7. **Imagenes perezosas:** en sitios como serviporno.com antes salian `0 imagenes`; ahora se usan `data-src`/`data-original`/`srcset`. Mira la linea `[page] ... N imagenes`.
+8. El log ya no se llena de `sceMouseRead devuelve` (antes ~10 000 lineas).

@@ -1,13 +1,17 @@
-// psbrowser v0.6.0 - "navegador de escritorio" para PS4: pestanas, barra de herramientas con omnibox, tema claro/oscuro,
+// psbrowser v0.7.0 - "navegador de escritorio" para PS4: pestanas, barra de herramientas con omnibox, tema claro/oscuro,
 // fuente TrueType proporcional, scroll suave en pixeles, imagenes (hilo aparte), formularios GET, anclas y configuracion.
 //
 // Teclado USB: Ctrl+T pestana nueva, Ctrl+W cerrar, Ctrl+RePag/AvPag o Ctrl+Tab cambiar; F6 o Ctrl+L = barra de direcciones;
 //   Tab / Shift+Tab = siguiente/anterior enlace o campo; Enter = activar (en un campo de texto: enviar el formulario);
 //   Backspace o Alt+Izq = atras; Alt+Der = adelante; F5 = recargar; F10 = configuracion; Ctrl+D = marcador;
 //   Ctrl+J = descargas; Ctrl+'+' / Ctrl+'-' / Ctrl+0 = zoom del texto; flechas, RePag, AvPag, Inicio, Fin, Espacio = desplazar.
-// Raton USB: clic = enlaces/botones/pestanas; clic central en un enlace = pestana nueva; clic derecho = atras; rueda = desplazar;
-//   la barra de desplazamiento se arrastra.
-// Mando (SDL): cruceta = foco/atras/adelante; boton 0 = activar, 1 = atras, 2 = recargar, 3 = inicio, 4/5 = pagina; stick = scroll.
+//   v0.7.0: Ctrl+C copia el enlace seleccionado o la URL; Ctrl+V pega en la barra/campos (o abre lo copiado si no editas); Ctrl+X, Ctrl+A en la
+//   barra; Ctrl+R recargar; Ctrl+Mayus+T reabre pestana; Ctrl+1..9 elige pestana; Alt+Inicio = inicio; tecla Menu o Mayus+F10 = menu contextual.
+// Raton USB: clic = enlaces/botones/pestanas; clic central en un enlace = pestana nueva; clic derecho = MENU CONTEXTUAL (abrir, copiar
+//   direccion del enlace/imagen, guardar, atras...); Ctrl+clic = pestana nueva; Alt+clic = descargar; rueda = desplazar; botones laterales =
+//   atras/adelante; la barra de desplazamiento se arrastra.
+// Mando (SDL): cruceta = foco/atras/adelante; boton 0 = activar, 1 = atras, 2 = recargar, 3 = inicio, 4/5 = pagina; stick = scroll;
+//   boton 11 (sin funcion hasta v0.6.0) = menu contextual del elemento con foco (cruceta mover, X elegir, O cerrar).
 // Todo se registra en /data/psbrowser/log.txt; configuracion en config.txt y marcadores en bookmarks.txt.
 #include <SDL2/SDL.h>
 #include <algorithm>
@@ -37,6 +41,7 @@
 #include "theme.h"
 #include "url.h"
 #include "download.h"
+#include "asyncwriter.h"
 // Lo piden los .h/.cpp de los samples de OpenOrbis (log.h): ellos lo declaran y el programa lo define.
 std::stringstream debugLogStream;
 static FILE* g_log = nullptr;
@@ -62,9 +67,9 @@ static const int TABBAR_H = 40, TOOLBAR_Y = 40, TOOLBAR_H = 48, VIEW_Y = 88, SBA
 static const int VIEW_H = H - VIEW_Y;
 // Codigos de tecla USB HID (los mismos que usa OpenOrbis en orbis/_types/keyboard.h).
 enum {
-    K_D = 7, K_J = 13, K_L = 15, K_T = 23, K_W = 26, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
+    K_A = 4, K_C = 6, K_D = 7, K_J = 13, K_L = 15, K_R = 21, K_T = 23, K_V = 25, K_W = 26, K_X = 27, K_1 = 30, K_9 = 38, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
     K_MINUS = 45, K_EQUAL = 46, K_F5 = 62, K_F6 = 63, K_F10 = 67, K_HOME = 74, K_PGUP = 75, K_END = 77, K_PGDOWN = 78,
-    K_RIGHT = 79, K_LEFT = 80, K_DOWN = 81, K_UP = 82
+    K_RIGHT = 79, K_LEFT = 80, K_DOWN = 81, K_UP = 82, K_APP = 101  // K_APP = tecla de menu contextual
 };
 // ------------------------------------------------------------------ configuracion y marcadores
 struct Config {
@@ -164,6 +169,19 @@ static void toast(const std::string& s, bool bad = false) {
     g_toastUntil = SDL_GetTicks() + 3500;
     g_dirty = true;
 }
+// ------------------------------------------------------------------ portapapeles interno y pestanas cerradas
+// La PS4 no da acceso al portapapeles del sistema a un homebrew: es interno al navegador (vale para pegar en la barra de direcciones y
+// en campos). Ademas se guarda en /data/psbrowser/clipboard.txt por si quieres leerlo desde un PC.
+static std::string g_clip;
+static void clipSet(const std::string& s) {
+    g_clip = s;
+    if (FILE* f = fopen("/data/psbrowser/clipboard.txt", "wb")) { fwrite(s.data(), 1, s.size(), f); fclose(f); }
+    std::string shown = s;
+    if (shown.size() > 70) shown = shown.substr(0, 70) + "...";
+    toast("Copiado: " + shown);
+}
+static std::vector<std::string> g_closedTabs;  // URLs de pestanas cerradas (Ctrl+Mayus+T las reabre)
+static bool g_modCtrl = false, g_modAlt = false, g_modShift = false;  // modificadores del teclado USB en este frame
 // ------------------------------------------------------------------ pestanas
 struct HistEntry {
     std::string req;        // URL pedida
@@ -232,9 +250,9 @@ static std::string genHome() {
          "<li><a href=\"https://info.cern.ch/\">info.cern.ch (la primera web)</a></li>"
          "<li><a href=\"http://example.com/\">example.com</a></li>"
          "</ul><h2>Controles</h2><ul>"
-         "<li>Teclado: Ctrl+T nueva pestana, Ctrl+W cerrar, F6 o Ctrl+L direccion, Tab/Enter enlaces y campos, Backspace atras, F5 recargar, F10 configuracion, Ctrl+D marcador, Ctrl +/- zoom.</li>"
-         "<li>Raton: clic en enlaces, botones y pestanas; clic central abre en pestana nueva; clic derecho = atras; rueda = desplazar.</li>"
-         "<li>Mando: cruceta = foco / atras / adelante; boton 0 activar, 1 atras, 2 recargar, 3 inicio, 4/5 pagina; stick = desplazar.</li>"
+         "<li>Teclado: Ctrl+T nueva pestana, Ctrl+W cerrar, F6 o Ctrl+L direccion, Tab/Enter enlaces y campos, Backspace atras, F5 recargar, F10 configuracion, Ctrl+D marcador, Ctrl +/- zoom, Ctrl+C copiar enlace o direccion, Ctrl+V pegar, Ctrl+Mayus+T reabrir pestana, tecla Menu = menu contextual.</li>"
+         "<li>Raton: clic en enlaces, botones y pestanas; clic central o Ctrl+clic abre en pestana nueva; Alt+clic descarga; clic derecho = menu contextual (copiar enlace o imagen, guardar, atras...); rueda = desplazar.</li>"
+         "<li>Mando: cruceta = foco / atras / adelante; boton 0 activar, 1 atras, 2 recargar, 3 inicio, 4/5 pagina; boton 11 menu contextual; stick = desplazar.</li>"
          "</ul><p>Sin JavaScript, sin video/audio y con CSS limitado. Los formularios POST se envian de verdad; no hay cookies ni JavaScript.</p></body></html>";
     return h;
 }
@@ -292,8 +310,9 @@ struct DlProgress {  // descarga en primer plano
     std::string name;
     long long done = 0, total = -1;
     float speed = 0;  // bytes/s (media movil)
-    uint32_t lastDraw = 0, lastSpeedT = 0;
+    uint32_t lastDraw = 0, lastSpeedT = 0, lastLog = 0, startT = 0;
     long long lastSpeedB = 0;
+    long long queueKb = 0;  // datos en cola esperando al disco
 };
 static DlProgress g_dlp;
 static std::vector<std::pair<std::string, std::string>> g_lastImgs;  // (URL absoluta, alt) de la ultima pagina web con imagenes
@@ -572,7 +591,7 @@ static std::string fmtTime(long long secs) {
 // Se llama con cada trozo recibido: cada ~300 ms recalcula la velocidad, atiende el mando (O = cancelar) y redibuja.
 static void dlTick() {
     const uint32_t now = SDL_GetTicks();
-    if (now - g_dlp.lastDraw < 300) return;  // subir el lienzo cuesta ~60 ms: no hacerlo con cada trozo
+    if (now - g_dlp.lastDraw < 600) return;  // subir el lienzo cuesta ~60 ms y la red no se lee mientras: no hacerlo con cada trozo
     const uint32_t dt = now - g_dlp.lastSpeedT;
     if (dt > 0) {
         const float inst = static_cast<float>(g_dlp.done - g_dlp.lastSpeedB) * 1000.0f / static_cast<float>(dt);
@@ -580,6 +599,12 @@ static void dlTick() {
     }
     g_dlp.lastSpeedT = now;
     g_dlp.lastSpeedB = g_dlp.done;
+    if (now - g_dlp.lastLog >= 5000) {  // diagnostico de velocidad en log.txt cada 5 s
+        g_dlp.lastLog = now;
+        psb_log("[dl] %s de %s, %.2f MB/s (media %.2f MB/s), cola de disco %lld KB", dl_format_size(g_dlp.done).c_str(),
+                g_dlp.total > 0 ? dl_format_size(g_dlp.total).c_str() : "?", g_dlp.speed / 1048576.0,
+                (now - g_dlp.startT) > 0 ? g_dlp.done * 1000.0 / (now - g_dlp.startT) / 1048576.0 : 0.0, g_dlp.queueKb);
+    }
     bool quit = false;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
@@ -597,11 +622,11 @@ static void dlTick() {
     present();
 }
 struct FileSink : HttpSink {
-    FILE* f = nullptr;
+    AsyncWriter w;  // el disco se escribe en otro hilo: red y disco avanzan a la vez
+    bool opened = false;
     std::string partPath, finalPath, name;
     bool diskError = false, htmlInstead = false, badStatus = false;
     int status = 0;
-    ~FileSink() override { if (f) fclose(f); }
     bool begin(const HttpResult& r) override {
         status = r.status;
         if (r.status < 200 || r.status >= 300) { badStatus = true; return false; }
@@ -612,18 +637,19 @@ struct FileSink : HttpSink {
         finalPath = dl_unique_path(kDlDir, name);
         name = finalPath.substr(strlen(kDlDir) + 1);
         partPath = finalPath + ".part";
-        f = fopen(partPath.c_str(), "wb");
-        if (!f) { diskError = true; return false; }
-        setvbuf(f, nullptr, _IOFBF, 256 * 1024);
+        if (!w.open(partPath)) { diskError = true; return false; }
+        opened = true;
         g_dlp.name = name;
         g_dlp.total = r.contentLength;
+        g_dlp.startT = SDL_GetTicks();
         psb_log("[dl] %s -> %s (%s)", r.finalUrl.c_str(), finalPath.c_str(),
                 r.contentLength >= 0 ? dl_format_size(r.contentLength).c_str() : "tamano desconocido");
         return true;
     }
     bool write(const void* d, size_t n) override {
-        if (fwrite(d, 1, n, f) != n) { diskError = true; return false; }
+        if (!w.write(d, n)) { diskError = true; return false; }
         g_dlp.done += static_cast<long long>(n);
+        g_dlp.queueKb = w.queued() / 1024;
         dlTick();
         return !g_dlp.cancel;
     }
@@ -642,13 +668,24 @@ static bool runDownload(const std::string& url, std::string& err) {
     present();
     FileSink sink;
     HttpResult res;
+    const uint32_t t0 = SDL_GetTicks();
     const bool ok = http_request(url, nullptr, res, 0, 8, &sink);
-    if (sink.f) { fclose(sink.f); sink.f = nullptr; }
+    const uint32_t tNet = SDL_GetTicks();
+    const bool flushed = sink.opened ? (g_dlp.cancel || !ok ? (sink.w.abort(), true) : sink.w.finish()) : true;  // espera a que el disco termine
+    const uint32_t tEnd = SDL_GetTicks();
+    if (sink.opened && !flushed) sink.diskError = true;
+    if (sink.opened && res.received > 0)
+        psb_log("[dl] red: %.1f s, %.2f MB/s | disco tras la red: %u ms | total %.1f s", (tNet - t0) / 1000.0,
+                res.received * 1000.0 / std::max<uint32_t>(1, tNet - t0) / 1048576.0, tEnd - tNet, (tEnd - t0) / 1000.0);
     g_dlp.active = false;
     g_loading = false;
     imgw_pause(false);
     g_dirty = true;
     bool good = ok && res.status >= 200 && res.status < 300;
+    if (good && sink.diskError) {
+        good = false;
+        err = "No se pudo escribir en el disco (sin espacio o sin permisos).";
+    }
     if (good && res.contentLength >= 0 && res.received < res.contentLength) {
         good = false;
         err = "La descarga quedo incompleta (" + dl_format_size(res.received) + " de " + dl_format_size(res.contentLength) + "): se cerro la conexion.";
@@ -835,6 +872,10 @@ static Browser* newTab(const std::string& url, bool activate) {
 }
 static void closeTab(int i) {
     if (i < 0 || i >= static_cast<int>(g_tabs.size())) return;
+    if (!g_tabs[i]->url.empty() && g_tabs[i]->url != "about:blank") {
+        g_closedTabs.push_back(g_tabs[i]->url);
+        if (g_closedTabs.size() > 15) g_closedTabs.erase(g_closedTabs.begin());
+    }
     delete g_tabs[i];
     g_tabs.erase(g_tabs.begin() + i);
     if (g_tabs.empty()) { newTab(homeUrl(), true); return; }
@@ -1126,6 +1167,202 @@ static RenderCtx makeRc(Browser& b) {
     rc.caretOn = g_caret;
     return rc;
 }
+// ------------------------------------------------------------------ menu contextual (clic derecho / tecla Menu / boton 11 del mando)
+enum CtxAct {
+    CA_SEP = 0, CA_OPEN_LINK, CA_OPEN_LINK_TAB, CA_COPY_LINK, CA_DL_LINK, CA_OPEN_IMG, CA_OPEN_IMG_TAB, CA_COPY_IMG, CA_DL_IMG,
+    CA_BACK, CA_FWD, CA_RELOAD, CA_COPY_URL, CA_BOOKMARK, CA_PASTE_GO, CA_EDIT_URL, CA_NEW_TAB, CA_CLOSE_TAB, CA_DUP_TAB,
+    CA_CLOSE_OTHERS, CA_REOPEN_TAB, CA_DOWNLOADS, CA_HOME, CA_BOOKMARKS
+};
+struct CtxItem { std::string label; int act; std::string arg; int tab; bool enabled; };
+struct CtxMenu {
+    bool open = false;
+    int x = 0, y = 0, w = 0, h = 0, sel = -1;
+    std::vector<CtxItem> items;
+};
+static CtxMenu g_ctx;
+static const int CTX_ITEM_H = 34, CTX_SEP_H = 11, CTX_PAD = 6, CTX_PX = 17;
+static void ctxAdd(const std::string& label, int act, const std::string& arg = std::string(), bool en = true, int tab = -1) {
+    g_ctx.items.push_back({label, act, arg, tab, en});
+}
+static void ctxSep() {
+    if (!g_ctx.items.empty() && g_ctx.items.back().act != CA_SEP) ctxAdd("", CA_SEP, "", false);
+}
+static int ctxItemY(int i) {  // y del borde superior del elemento i (en pantalla)
+    int y = g_ctx.y + CTX_PAD;
+    for (int k = 0; k < i; k++) y += g_ctx.items[k].act == CA_SEP ? CTX_SEP_H : CTX_ITEM_H;
+    return y;
+}
+static void ctxLayout() {
+    while (!g_ctx.items.empty() && g_ctx.items.back().act == CA_SEP) g_ctx.items.pop_back();
+    int w = 220, h = CTX_PAD * 2;
+    for (const CtxItem& it : g_ctx.items) {
+        if (it.act == CA_SEP) { h += CTX_SEP_H; continue; }
+        h += CTX_ITEM_H;
+        w = std::max(w, te_width(it.label, FONT_SANS, CTX_PX, false) + 44);
+    }
+    g_ctx.w = w;
+    g_ctx.h = h;
+    g_ctx.x = std::max(4, std::min(g_ctx.x, W - w - 4));  // que quepa en pantalla
+    g_ctx.y = std::max(4, std::min(g_ctx.y, H - h - 4));
+}
+// Elemento bajo (x,y): indice, -2 si esta en el menu pero no sobre un elemento (separador/borde), -1 fuera del menu.
+static int ctxHit(int x, int y) {
+    if (!g_ctx.open || x < g_ctx.x || x >= g_ctx.x + g_ctx.w || y < g_ctx.y || y >= g_ctx.y + g_ctx.h) return -1;
+    for (size_t i = 0; i < g_ctx.items.size(); i++) {
+        if (g_ctx.items[i].act == CA_SEP) continue;
+        const int iy = ctxItemY(static_cast<int>(i));
+        if (y >= iy && y < iy + CTX_ITEM_H) return static_cast<int>(i);
+    }
+    return -2;
+}
+static void ctxMove(int dir) {  // salta separadores y elementos desactivados
+    const int n = static_cast<int>(g_ctx.items.size());
+    if (n == 0) return;
+    int i = g_ctx.sel;
+    for (int k = 0; k < n + 1; k++) {
+        i = i < 0 ? (dir > 0 ? 0 : n - 1) : (i + dir + n) % n;
+        if (g_ctx.items[i].act != CA_SEP && g_ctx.items[i].enabled) { g_ctx.sel = i; g_dirty = true; return; }
+    }
+}
+// 'forceFocus' >= 0: usar ese elemento de doc.focus (teclado/mando) en vez de lo que haya bajo el puntero.
+static void ctxOpen(int x, int y, int forceFocus = -1) {
+    Browser& b = B;
+    g_ctx = CtxMenu();
+    g_ctx.x = x;
+    g_ctx.y = y;
+    const int ui = forceFocus >= 0 ? -1 : uiAt(x, y);
+    const int kind = ui >= 0 ? g_ui[ui].kind : 0;
+    const bool canBack = b.histPos > 0, canFwd = b.histPos >= 0 && b.histPos + 1 < static_cast<int>(b.hist.size());
+    const bool real = !b.url.empty() && !isInternal(b.url);
+    if (kind == UI_TAB || kind == UI_TABCLOSE) {
+        const int ti = g_ui[ui].arg;
+        ctxAdd("Pestana nueva", CA_NEW_TAB);
+        ctxAdd("Duplicar pestana", CA_DUP_TAB, "", true, ti);
+        ctxSep();
+        ctxAdd("Cerrar pestana", CA_CLOSE_TAB, "", true, ti);
+        ctxAdd("Cerrar las demas", CA_CLOSE_OTHERS, "", g_tabs.size() > 1, ti);
+        ctxAdd("Reabrir pestana cerrada", CA_REOPEN_TAB, "", !g_closedTabs.empty());
+    } else if (kind == UI_OMNI) {
+        const bool have = !b.url.empty() && !isInternal(b.url);
+        ctxAdd("Copiar direccion", CA_COPY_URL, b.url, have);
+        ctxAdd("Pegar y buscar", CA_PASTE_GO, "", !g_clip.empty());
+        ctxAdd("Editar direccion", CA_EDIT_URL);
+    } else {
+        std::string linkUrl, imgUrl;
+        const RenderCtx rc = makeRc(b);
+        int fi = forceFocus >= 0 ? forceFocus : (ui < 0 ? hitFocus(b.doc, rc, x, y) : -1);
+        if (fi >= 0 && fi < static_cast<int>(b.doc.focus.size()) && b.doc.focus[fi].kind == 0) linkUrl = focusTarget(b, fi);
+        const int ii = (forceFocus >= 0 || ui >= 0) ? -1 : hitImage(b.doc, rc, x, y);
+        if (ii >= 0) {
+            const std::string full = urlResolve(b.url, b.doc.images[ii].src);
+            if (urlIsHttp(full)) imgUrl = full;
+        }
+        if (!linkUrl.empty() && (urlIsHttp(linkUrl) || isInternal(linkUrl))) {
+            ctxAdd("Abrir enlace", CA_OPEN_LINK, linkUrl);
+            ctxAdd("Abrir en pestana nueva", CA_OPEN_LINK_TAB, linkUrl);
+            ctxAdd("Copiar direccion del enlace", CA_COPY_LINK, linkUrl);
+            if (urlIsHttp(linkUrl)) ctxAdd("Descargar enlace", CA_DL_LINK, linkUrl);
+            ctxSep();
+        }
+        if (!imgUrl.empty()) {
+            ctxAdd("Abrir imagen", CA_OPEN_IMG, imgUrl);
+            ctxAdd("Abrir imagen en pestana nueva", CA_OPEN_IMG_TAB, imgUrl);
+            ctxAdd("Copiar direccion de la imagen", CA_COPY_IMG, imgUrl);
+            ctxAdd("Guardar imagen", CA_DL_IMG, imgUrl);
+            ctxSep();
+        }
+        ctxAdd("Atras", CA_BACK, "", canBack);
+        ctxAdd("Adelante", CA_FWD, "", canFwd);
+        ctxAdd("Recargar", CA_RELOAD);
+        ctxSep();
+        ctxAdd("Copiar direccion de la pagina", CA_COPY_URL, b.url, real);
+        ctxAdd(bookmarkIndex(b.url) >= 0 ? "Quitar marcador" : "Anadir marcador", CA_BOOKMARK, "", real);
+        ctxAdd("Pegar y buscar", CA_PASTE_GO, "", !g_clip.empty());
+        ctxSep();
+        ctxAdd("Pestana nueva", CA_NEW_TAB);
+        ctxAdd("Reabrir pestana cerrada", CA_REOPEN_TAB, "", !g_closedTabs.empty());
+        ctxAdd("Marcadores", CA_BOOKMARKS);
+        ctxAdd("Descargas", CA_DOWNLOADS);
+        ctxAdd("Inicio", CA_HOME);
+    }
+    g_ctx.open = true;
+    ctxLayout();
+    g_ctx.sel = forceFocus >= 0 ? -1 : ctxHit(g_mx, g_my);
+    if (g_ctx.sel == -2) g_ctx.sel = -1;
+    if (forceFocus >= 0) ctxMove(1);
+    g_dirty = true;
+}
+static void reopenClosedTab() {
+    if (g_closedTabs.empty()) { toast("No hay pestanas cerradas", true); return; }
+    const std::string u = g_closedTabs.back();
+    g_closedTabs.pop_back();
+    newTab(u, true);
+}
+static void ctxRun(int i) {
+    if (i < 0 || i >= static_cast<int>(g_ctx.items.size())) return;
+    const CtxItem it = g_ctx.items[i];
+    if (!it.enabled || it.act == CA_SEP) return;
+    g_ctx.open = false;
+    g_dirty = true;
+    Browser& b = B;
+    switch (it.act) {
+        case CA_OPEN_LINK: case CA_OPEN_IMG: navigate(b, it.arg, true); break;
+        case CA_OPEN_LINK_TAB: case CA_OPEN_IMG_TAB: newTab(it.arg, true); break;
+        case CA_COPY_LINK: case CA_COPY_IMG: case CA_COPY_URL: clipSet(it.arg); break;
+        case CA_DL_LINK: case CA_DL_IMG: handleAction(b, "dlgo:" + it.arg); break;
+        case CA_BACK: goBack(b); break;
+        case CA_FWD: goForward(b); break;
+        case CA_RELOAD: reload(b); break;
+        case CA_BOOKMARK: toggleBookmark(b); break;
+        case CA_PASTE_GO: { const std::string u = urlFromUserInput(g_clip); if (!u.empty()) navigate(b, u, true); break; }
+        case CA_EDIT_URL: startUrlEdit(b, isInternal(b.url) ? "" : b.url, true); break;
+        case CA_NEW_TAB: { Browser* t = newTab("about:blank", true); startUrlEdit(*t, "", false); break; }
+        case CA_CLOSE_TAB: closeTab(it.tab); break;
+        case CA_DUP_TAB: if (it.tab >= 0 && it.tab < static_cast<int>(g_tabs.size())) newTab(g_tabs[it.tab]->url, true); break;
+        case CA_CLOSE_OTHERS:
+            if (it.tab >= 0 && it.tab < static_cast<int>(g_tabs.size())) {
+                Browser* keep = g_tabs[it.tab];
+                for (size_t k = 0; k < g_tabs.size();) {
+                    if (g_tabs[k] == keep) { k++; continue; }
+                    delete g_tabs[k];
+                    g_tabs.erase(g_tabs.begin() + k);
+                }
+                g_cur = 0;
+                g_dirty = true;
+            }
+            break;
+        case CA_REOPEN_TAB: reopenClosedTab(); break;
+        case CA_DOWNLOADS: navigate(b, "about:downloads", true); break;
+        case CA_BOOKMARKS: navigate(b, "about:bookmarks", true); break;
+        case CA_HOME: navigate(b, homeUrl(), true); break;
+        default: break;
+    }
+}
+// Abre el menu para el elemento con foco (teclado/mando), cerca de ese elemento.
+static void ctxOpenAtFocus() {
+    Browser& b = B;
+    int x = contentLeft() + 60, y = VIEW_Y + 80;
+    if (b.sel >= 0 && b.sel < static_cast<int>(b.focusY.size()) && b.focusY[b.sel] >= 0) {
+        y = VIEW_Y + b.focusY[b.sel] - static_cast<int>(b.scrollY) + 24;
+        y = std::max(VIEW_Y + 20, std::min(H - 60, y));
+    }
+    if (g_mouseOk) { x = g_mx; y = g_my; }
+    ctxOpen(x, y, b.sel >= 0 ? b.sel : -1);
+}
+static void drawCtx(Canvas& cv) {
+    if (!g_ctx.open) return;
+    const Theme& th = g_th;
+    cv.rrect(g_ctx.x + 3, g_ctx.y + 4, g_ctx.w, g_ctx.h, 10, 0x55000000);  // sombra
+    cv.rrect(g_ctx.x - 1, g_ctx.y - 1, g_ctx.w + 2, g_ctx.h + 2, 10, th.rule);
+    cv.rrect(g_ctx.x, g_ctx.y, g_ctx.w, g_ctx.h, 9, th.toolbar);
+    for (size_t i = 0; i < g_ctx.items.size(); i++) {
+        const CtxItem& it = g_ctx.items[i];
+        const int iy = ctxItemY(static_cast<int>(i));
+        if (it.act == CA_SEP) { cv.rect(g_ctx.x + 10, iy + CTX_SEP_H / 2, g_ctx.w - 20, 1, th.rule); continue; }
+        if (static_cast<int>(i) == g_ctx.sel && it.enabled) cv.rrect(g_ctx.x + 4, iy, g_ctx.w - 8, CTX_ITEM_H, 6, th.focusBg);
+        te_draw(cv, g_ctx.x + 18, baseFor(iy, CTX_ITEM_H, FONT_SANS, CTX_PX), it.label, FONT_SANS, CTX_PX, false, it.enabled ? th.text : th.dim);
+    }
+}
 static void drawTabbar(Canvas& cv, Browser& cur) {
     const Theme& th = g_th;
     cv.rect(0, 0, W, TABBAR_H, th.tabbar);
@@ -1310,6 +1547,7 @@ static void drawFrame() {
     drawTabbar(cv, b);
     drawToolbar(cv, b);
     drawBubble(cv, b, SDL_GetTicks());
+    drawCtx(cv);
     if (g_dlp.active) drawDownload(cv);
     if (g_osk.open) osk_draw(g_osk, cv, th, W, H, g_caret);
 }
@@ -1356,6 +1594,13 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
     static int logged = 0;
     if (logged < 60) { logged++; psb_log("tecla: codigo=%d char=%d mods=0x%x", code, ch, mods); }
     Browser& b = B;
+    if (g_ctx.open) {  // el menu contextual captura el teclado
+        if (code == K_ESC || code == K_APP) { g_ctx.open = false; g_dirty = true; }
+        else if (code == K_UP) ctxMove(-1);
+        else if (code == K_DOWN || code == K_TAB) ctxMove(1);
+        else if (code == K_RETURN && g_ctx.sel >= 0) ctxRun(g_ctx.sel);
+        return;
+    }
     if (g_osk.open) {
         if (code == K_ESC) oskApply(b, OSK_CANCELLED);
         return;
@@ -1373,6 +1618,19 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
         } else if (code == K_BACKSPACE) {
             if (b.urlFresh) { b.urlText.clear(); b.urlFresh = false; }
             else utf8_pop_back(b.urlText);
+            g_dirty = true;
+        } else if (ctrl && code == K_V) {  // pegar (una sola linea)
+            std::string c;
+            for (char x : g_clip) if (x != '\r' && x != '\n') c += x;
+            if (b.urlFresh) { b.urlText.clear(); b.urlFresh = false; }
+            b.urlText += c;
+            g_dirty = true;
+        } else if (ctrl && (code == K_C || code == K_X)) {
+            clipSet(b.urlText);
+            if (code == K_X) { b.urlText.clear(); b.urlFresh = false; }
+            g_dirty = true;
+        } else if (ctrl && code == K_A) {  // seleccionar todo: lo siguiente que se escriba lo sustituye
+            b.urlFresh = true;
             g_dirty = true;
         } else if (ch >= 32 && ch < 127 && !ctrl) {
             if (b.urlFresh) { b.urlText.clear(); b.urlFresh = false; }
@@ -1402,6 +1660,13 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
         } else if (code == K_BACKSPACE) {
             utf8_pop_back(f.value);
             g_dirty = true;
+        } else if (ctrl && code == K_V) {
+            for (char x : g_clip) if (x != '\r' && x != '\n') f.value += x;
+            g_dirty = true;
+        } else if (ctrl && (code == K_C || code == K_X)) {
+            clipSet(f.value);
+            if (code == K_X) f.value.clear();
+            g_dirty = true;
         } else if (ch >= 32 && ch < 127 && !ctrl) {
             f.value += static_cast<char>(ch);
             g_dirty = true;
@@ -1411,8 +1676,23 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
     // 3) atajos con Ctrl
     if (ctrl) {
         const int n = static_cast<int>(g_tabs.size());
+        if (code >= K_1 && code <= K_9) {  // Ctrl+1..8 = esa pestana, Ctrl+9 = la ultima
+            activateTab(code == K_9 ? n - 1 : std::min(code - K_1, n - 1));
+            return;
+        }
         switch (code) {
-            case K_T: { Browser* t = newTab("about:blank", true); startUrlEdit(*t, "", false); return; }
+            case K_T:
+                if (shift) reopenClosedTab();
+                else { Browser* t = newTab("about:blank", true); startUrlEdit(*t, "", false); }
+                return;
+            case K_R: reload(b); return;
+            case K_C: {  // copiar: el enlace seleccionado o, si no hay, la direccion de la pagina
+                std::string u = b.sel >= 0 ? focusTarget(b, b.sel) : std::string();
+                if (u.empty() && !isInternal(b.url)) u = b.url;
+                if (u.empty()) toast("Nada que copiar", true); else clipSet(u);
+                return;
+            }
+            case K_V: { const std::string u = urlFromUserInput(g_clip); if (!u.empty()) navigate(b, u, true); return; }  // pegar y buscar/ir
             case K_W: closeTab(g_cur); return;
             case K_PGUP: activateTab((g_cur + n - 1) % n); return;
             case K_PGDOWN: activateTab((g_cur + 1) % n); return;
@@ -1429,7 +1709,8 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
     switch (code) {
         case K_F6: startUrlEdit(b, isInternal(b.url) ? "" : b.url, true); return;
         case K_F5: reload(b); return;
-        case K_F10: navigate(b, "about:settings", true); return;
+        case K_F10: if (shift) ctxOpenAtFocus(); else navigate(b, "about:settings", true); return;
+        case K_APP: ctxOpenAtFocus(); return;
         case K_BACKSPACE: goBack(b); return;
         case K_LEFT: if (alt) { goBack(b); return; } break;
         case K_RIGHT: if (alt) { goForward(b); return; } break;
@@ -1440,7 +1721,7 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
         case K_PGUP: scrollBy(b, -VIEW_H * 9 / 10); return;
         case K_PGDOWN: scrollBy(b, VIEW_H * 9 / 10); return;
         case K_SPACE: scrollBy(b, shift ? -VIEW_H * 9 / 10 : VIEW_H * 9 / 10); return;
-        case K_HOME: scrollTo(b, 0, false); return;
+        case K_HOME: if (alt) navigate(b, homeUrl(), true); else scrollTo(b, 0, false); return;
         case K_END: scrollTo(b, maxScroll(b), false); return;
         default: break;
     }
@@ -1467,6 +1748,12 @@ static void updateHover(int x, int y) {
 }
 static void mouseLeftPress(bool& dragging, int& dragOff) {
     Browser& b = B;
+    if (g_ctx.open) {  // menu contextual: clic en un elemento lo ejecuta; fuera lo cierra
+        const int hi = ctxHit(g_mx, g_my);
+        if (hi >= 0) ctxRun(hi);
+        else if (hi == -1) { g_ctx.open = false; g_dirty = true; }
+        return;
+    }
     const int ui = uiAt(g_mx, g_my);
     if (ui >= 0) {
         const UiRect r = g_ui[ui];
@@ -1492,12 +1779,20 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
     }
     if (b.urlEdit) { b.urlEdit = false; g_dirty = true; }
     const int fi = hitFocus(b.doc, makeRc(b), g_mx, g_my);
+    if (fi >= 0 && b.doc.focus[fi].kind == 0 && (g_modCtrl || g_modAlt)) {  // Ctrl+clic = pestana nueva; Alt+clic = descargar
+        const std::string t = focusTarget(b, fi);
+        if (urlIsHttp(t)) {
+            if (g_modAlt) handleAction(b, "dlgo:" + t);
+            else followLink(b, b.doc.focus[fi].ref, true);
+            return;
+        }
+    }
     if (fi >= 0) activateFocus(b, fi);
     else if (b.editField >= 0) { b.editField = -1; g_dirty = true; }
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.6.0 ==");
+    psb_log("== psbrowser v0.7.0 ==");
     configLoad();
     bookmarksLoad();
     dlListLoad();
@@ -1551,6 +1846,12 @@ int main(int, char**) {
                 case SDL_QUIT: running = false; break;
                 case SDL_JOYBUTTONDOWN:
                     psb_log("boton %d", e.jbutton.button);
+                    if (g_ctx.open) {  // menu contextual con el mando: cruceta = mover, X = elegir, O = cerrar
+                        if (e.jbutton.button == 0) { if (g_ctx.sel >= 0) ctxRun(g_ctx.sel); }
+                        else if (e.jbutton.button == 1 || e.jbutton.button == 11) { g_ctx.open = false; g_dirty = true; }
+                        break;
+                    }
+                    if (e.jbutton.button == 11 && !g_osk.open) { ctxOpenAtFocus(); break; }  // boton 11 (sin funcion hasta ahora) = menu contextual
                     if (g_osk.open) {  // el teclado en pantalla captura el mando
                         OskResult r = OSK_NONE;
                         switch (e.jbutton.button) {
@@ -1584,6 +1885,11 @@ int main(int, char**) {
                     break;
                 case SDL_JOYHATMOTION:
                     psb_log("hat %d", e.jhat.value);
+                    if (g_ctx.open) {
+                        if (e.jhat.value & SDL_HAT_UP) ctxMove(-1);
+                        if (e.jhat.value & SDL_HAT_DOWN) ctxMove(1);
+                        break;
+                    }
                     if (g_osk.open) {
                         OskResult r = OSK_NONE;
                         if (e.jhat.value & SDL_HAT_UP) r = osk_input(g_osk, OSK_UP);
@@ -1618,6 +1924,9 @@ int main(int, char**) {
             const uint32_t mods = (kb->CheckModifierKey(Keyboard::SHIFT) ? (ORBIS_KEYBOARD_MOD_LEFT_SHIFT) : 0) |
                                   (kb->CheckModifierKey(Keyboard::CTRL) ? (ORBIS_KEYBOARD_MOD_LEFT_CTRL) : 0) |
                                   (kb->CheckModifierKey(Keyboard::ALT) ? (ORBIS_KEYBOARD_MOD_LEFT_ALT) : 0);
+            g_modCtrl = (mods & ORBIS_KEYBOARD_MOD_LEFT_CTRL) != 0;
+            g_modAlt = (mods & ORBIS_KEYBOARD_MOD_LEFT_ALT) != 0;
+            g_modShift = (mods & ORBIS_KEYBOARD_MOD_LEFT_SHIFT) != 0;
             for (uint16_t k : cur) {
                 auto it = std::find_if(held.begin(), held.end(), [k](const Held& h) { return h.code == k; });
                 if (it == held.end()) {
@@ -1660,11 +1969,15 @@ int main(int, char**) {
                         const int track = VIEW_H - g_thumbH;
                         const float r = track > 0 ? static_cast<float>(g_my - dragOff - VIEW_Y) / track : 0.0f;
                         scrollTo(B, static_cast<int>(std::max(0.0f, std::min(1.0f, r)) * maxScroll(B)), true);
+                    } else if (g_ctx.open) {
+                        const int hi = ctxHit(g_mx, g_my);
+                        const int ns = (hi >= 0 && g_ctx.items[hi].enabled) ? hi : -1;
+                        if (ns != g_ctx.sel) { g_ctx.sel = ns; g_dirty = true; }
                     } else {
                         updateHover(g_mx, g_my);
                     }
                 }
-                if (ms.wheel && !g_osk.open) {
+                if (ms.wheel && !g_osk.open && !g_ctx.open) {
                     static int wlog = 0;
                     if (wlog < 10) { wlog++; psb_log("rueda: %d", ms.wheel); }
                     scrollBy(B, ((ms.wheel > 0) != g_cfg.wheelInvert ? -1 : 1) * g_cfg.wheelStep * 40);
@@ -1672,8 +1985,10 @@ int main(int, char**) {
                 const uint32_t pressed = ms.buttons & ~prevButtons;
                 if ((pressed & 1) && !g_osk.open) mouseLeftPress(dragging, dragOff);
                 if (!(ms.buttons & 1)) dragging = false;
-                if ((pressed & 2) && !g_osk.open) goBack(B);
-                if (pressed & 4) {  // central: enlace en pestana nueva / cerrar pestana
+                if ((pressed & 2) && !g_osk.open) ctxOpen(g_mx, g_my);  // clic derecho = menu contextual (Atras esta dentro del menu)
+                if ((pressed & 8) && !g_osk.open && !g_ctx.open) goBack(B);     // botones laterales (si el raton los tiene)
+                if ((pressed & 16) && !g_osk.open && !g_ctx.open) goForward(B);
+                if ((pressed & 4) && !g_ctx.open) {  // central: enlace en pestana nueva / cerrar pestana
                     const int ui = uiAt(g_mx, g_my);
                     if (ui >= 0 && g_ui[ui].kind == UI_TAB) closeTab(g_ui[ui].arg);
                     else {

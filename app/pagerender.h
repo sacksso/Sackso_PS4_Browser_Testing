@@ -18,5 +18,7 @@ struct RenderCtx {
 void drawDocument(Canvas& cv, const Document& d, const RenderCtx& rc);
 // Devuelve el indice de Document::focus bajo (mx,my) o -1.
 int hitFocus(const Document& d, const RenderCtx& rc, int mx, int my);
+// Devuelve el indice de Document::images de la imagen bajo (mx,my) o -1 (aunque no sea enlace).
+int hitImage(const Document& d, const RenderCtx& rc, int mx, int my);
 // Indice de la primera linea visible con y+h > scroll (busqueda binaria).
 int firstVisibleLine(const Document& d, int scroll);
