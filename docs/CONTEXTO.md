@@ -1,7 +1,7 @@
 # Contexto del proyecto psbrowser (para continuar en otro chat o con otra IA)
 
 > Pega este documento al inicio de una conversación nueva junto con el zip del repo (y, si los tienes, el último `log.txt` y el zip `logs` del CI). Idioma de trabajo: **español**.
-> Última actualización: 6 de noviembre de 2026 (**v0.5.1 probada en PS4**; v0.5.2 = v0.5.1 + reintento ante 429, sin probar).
+> Última actualización: 7 de noviembre de 2026 (**v0.5.2 probada en PS4**; **v0.6.0 = v0.5.2 + descargas en primer plano, sin probar en consola**: es el siguiente PKG a instalar).
 
 ## 1. Qué es
 Navegador homebrew para **PS4 con GoldHEN**, hecho con el toolchain **OpenOrbis** (LLVM, `x86_64-pc-freebsd12-elf`).
@@ -10,12 +10,13 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 
 ## 2. Cómo trabajamos (reglas del usuario)
 - La IA escribe código y workflows; el usuario sube a GitHub, ejecuta el CI (GitHub Actions, workflow manual `build-pkg.yml`), instala el PKG en su PS4 real y devuelve `/data/psbrowser/log.txt` (a veces `last.html`, `config.txt`, `bookmarks.txt` y el zip `logs` del CI).
+- **En cada avance que entregue archivos, la IA entrega también este `docs/CONTEXTO.md` actualizado** (como `CONTEXTO.md` suelto además de dentro del zip), para que otro chat u otra IA pueda continuar.
 - Si cambia un workflow, dar los comandos `git` exactos. No añadir al commit carpetas de desarrollo sin seguimiento.
 - Ser honesto sobre lo que **no** se ha probado en consola. Pedir el log antes de cambiar mapeos de entrada.
 - Repo del usuario: `Sackso_PS4_Browser_Testing` (GitHub). Proyecto anterior reutilizado: `sacksso/Sackso_Ren.py_ps4-testing`.
 - Consejos prácticos para la IA:
   - Los archivos de chat/log que sube el usuario pueden venir en **UTF-16** (BOM `ff fe`): decodificar con `utf-16`, no con `cat`.
-  - Si el entorno tiene red: descargar el toolchain (`https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz`, 158 MB), `apt install clang lld` y **compilar de verdad** replicando el CI (ver §8). Si no hay red (lo normal hasta ahora), decirlo: se comprueba solo con **stubs** de SDL/orbis (`g++ -fsyntax-only -I<stubs>`) y pruebas de lógica en PC; el CI es la comprobación real. Los stubs de `SDL2/SDL.h`, `keyboard.h`, `orbis/{Http,Net,Ssl,Sysmodule,libkernel}.h` y `stb/*.h` hay que recrearlos (son mínimos: declaraciones con las firmas que usa el código).
+  - Si el entorno tiene red: descargar el toolchain (`https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz`, 158 MB), `apt install clang lld` y **compilar de verdad** replicando el CI (ver §8). Si no hay red (lo normal hasta ahora), decirlo: se comprueba solo con **stubs** de SDL/orbis (`g++ -fsyntax-only -I<stubs>`) y pruebas de lógica en PC; el CI es la comprobación real. Desde v0.6.0 los stubs mínimos están en el repo: `tools/stubs/` (SDL2, orbis, keyboard, stb_image) y las pruebas en `tools/tests/` (ver `tools/README.md`): `-fsyntax-only` de `main.cpp`, tests de `download.cpp` y de `netclient.cpp` contra un `sceHttp` simulado.
   - `/bin/sh` es dash (sin brace expansion).
   - El workspace de la IA es efímero (`/tmp` se pierde al cerrar el chat): todo lo importante va al zip que se entrega.
 
@@ -27,7 +28,8 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 | 0.4.1 | Arreglo del cuelgue (GIF desactivado, pausa/cancelación del hilo de imágenes) | Probada: bien, pero ~10 fps |
 | **0.5.0** | 0.4.1 + **`-O2` en el CI** + **teclado en pantalla** con el mando (`osk.*`) | **Probada en PS4: "el teclado funciona excelente, el rendimiento se siente excelente"** |
 | 0.5.1 | 0.5.0 + gzip/deflate, charsets ISO-8859-1/Windows-1252, POST real, cabeceras Accept*, inventario del toolchain en el CI | **Probada en PS4:** compila y arranca; POST funciona; el sistema ya descomprime gzip |
-| **0.5.2** | 0.5.1 + reintento con espera ante HTTP 429/503 en imágenes (Wikimedia) y ritmo suave con `wikimedia.org` | **Sin probar.** Es el siguiente PKG a instalar |
+| 0.5.2 | 0.5.1 + reintento con espera ante HTTP 429/503 en imágenes (Wikimedia) y ritmo suave con `wikimedia.org` | **Probada en PS4** (log de 2692 líneas, ver abajo). El 429 no se pudo re-probar: ese log no visitó Wikipedia |
+| **0.6.0** | 0.5.2 + **descargas** (archivos, imágenes y vídeos directos) en primer plano con progreso y cancelación, `about:downloads`, `about:images`, Ctrl+J | **Sin probar en PS4.** Compila con stubs y la lógica pasa pruebas en PC. Es el siguiente PKG a instalar |
 
 ## 4. Resultados de las pruebas en PS4 real
 ### Prueba v0.5.0 (log de 1092 líneas)
@@ -49,6 +51,14 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 - **Reddit no se probó directamente.** Búsqueda web (nov 2026): Reddit exige iniciar sesión para `old.reddit.com` desde julio de 2026, lo limita a cuentas activas en los últimos 6 meses, y a finales de octubre anunció migrar a una experiencia "principalmente con sesión" y retirar RSS/API pública; la portada logged-out seguirá abierta, el resto de reddit.com sin sesión es JS pesado. Conclusión: Reddit solo es viable con navegador real (ver §7, fidelidad visual).
 - **Toolchain (inventario del CI):** existen `libSceAvPlayer.so`, `libSceAvPlayerStreaming.so`, `libSceVideodec*.so`, `libSceVdec*.so`, `libSceAudioOut.so`, `libSceImeDialog.so`, y las cabeceras `orbis/AvPlayer.h`, `AvPlayerStreaming.h`, `Videodec.h`, `Videodec2.h`, `AudioOut.h`, `ImeDialog.h`, `Ime.h`. Samples: `SDL2, audio-wav, dialogs, font, graphics, input, keyboard, net_http, networking, pngdec, system, threading…` (ningún sample de vídeo). `Http.h` confirma `sceHttpCreateRequestWithURL(int32_t connId, int32_t method, const char* url, uint64_t contentLength)` y `sceHttpSendRequest(int32_t, const void*, size_t)` (el POST con `decltype` compiló).
 - **Botones del mando:** aparece el **11** (41 veces, siempre pegado a otra pulsación; sin función asignada, inofensivo) y el 19. Los botones 8/9 siguen sin verse en ningún log: la barra de direcciones por mando no se ha podido confirmar (el usuario navega con el buscador de DuckDuckGo y marcadores).
+
+### Prueba v0.5.2 (log de 2692 líneas)
+- Páginas OK (sin cuelgues): DuckDuckGo, realmadrid.com (1,8 MB, 830 líneas, 60 imágenes), wallpapers.com, gettyimages.com(.mx), wallpaperaccess.com.
+- **Ningún HTTP 429** en este log (no se visitó Wikipedia): el reintento de 0.5.2 sigue sin comprobarse.
+- **Imágenes que no se decodifican (102 en total):** **67 WebP**, 15 SVG, 17 ICO (`image/x-icon`, `image/vnd.microsoft.icon`: favicons que DuckDuckGo pide), 3 GIF. **WebP es hoy el formato que más falla** en sitios de imágenes: prioridad alta tras las descargas.
+- **Reddit (`https://www.reddit.com/`)**: 200 con 8406 bytes, **0 líneas** (cascarón de JavaScript con CSP por `nonce`, `Retry-After: 0`, `Cache-Control: no-store`). Confirma que Reddit solo es viable con navegador real/servidor intermedio.
+- `last.html` entregado = Hacker News (no sirve para diagnosticar XDA; `xdaforums.com` sigue con 0 líneas sin diagnosticar).
+- **Botones del mando vistos:** 0 (✕), 1 (○), 2, 3, 11, 13–16 (cruceta), 17 (nuevo, sin identificar) y **9 (2 veces: ya aparece Options)**. El 8 sigue sin verse. Los botones 18/19 no salieron esta vez.
 
 ## 5. Hallazgos técnicos (probados en PS4 salvo que se diga)
 - **Red/TLS con el sistema:** `sceHttp`/`sceSsl` funcionan: DNS, HTTP, HTTPS, chunked, redirecciones (manuales leyendo `Location`). Pools: net 16 KB, ssl 300 KB, http 1 MB. Módulos NET, HTTP, SSL vía `sceSysmoduleLoadModuleInternal`. Certificados reales validados (`verifyErr=0`) → TLS estricto por defecto (`-DPSB_STRICT_TLS`).
@@ -80,6 +90,15 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 - `main.cpp`: `g_post/g_hasPost` consumidos por `load()` una sola vez; `submitForm` envía POST real (urlencoded; no multipart). Volver/recargar de una página POST usa la copia en memoria/GET.
 - CI: `-O2`; paso "Inventario del toolchain" → `logs/toolchain_inventory.txt` (libs/cabeceras de AvPlayer, video, IME, imagen; firmas de Http.h; samples).
 
+### Cambios de arquitectura en v0.6.0 (descargas)
+- **`netclient`:** `http_request(url, post, out, maxBody, maxRedirects, HttpSink* sink = nullptr, HttpGate gate = nullptr)`. `HttpSink{begin(HttpResult&), write(data,n)}` recibe el cuerpo por trozos (32 KB) sin acumularlo; con sink la petición pide `Accept: */*` y `Accept-Encoding: identity`. `HttpGate` (puntero a función) se llama con las cabeceras de la respuesta final **antes de leer el cuerpo**; si devuelve `false`, `out.stopped=true` y no se lee nada (solo cabeceras). `HttpResult` gana `contentDisposition`, `received`, `stopped`. Probado en PC con un `sceHttp` simulado (`tools/tests/test_netclient_mock.cpp`).
+- **`download.h/.cpp` (puro, probado en PC):** `dl_is_page_type` (qué muestra el visor), `dl_is_previewable_image` (PNG/JPEG/BMP), `dl_is_streaming` (m3u8/mpd), `dl_is_attachment`, `dl_filename` (Content-Disposition `filename*`/`filename`, si no último segmento de la URL; sanea rutas/caracteres raros, máx. 120 bytes sin romper UTF-8; añade extensión según Content-Type; quita `.php/.asp…` de scripts), `dl_unique_path` (`nombre (1).ext`), `dl_format_size`, `dl_type_label`.
+- **`main.cpp`:**
+  - `load()` pasa `pageGate` a `http_request`: si el estado es 2xx y el tipo no es mostrable (o hay `Content-Disposition: attachment`) no lee el cuerpo y llama a `showDownloadPrompt` → página HTML de confirmación (nombre, tipo, tamaño, `[Descargar]` = `psb:dlgo:<url>`, `[Cancelar]` = `psb:dlback`, vista previa si es PNG/JPEG/BMP; `[Descargar]` queda seleccionado). Listas `.m3u8/.mpd` muestran un aviso de streaming. Ya no existe `isMediaUrl`: los `.mp4/.webm` directos se descargan.
+  - `runDownload(url, err)`: **primer plano**. Pausa/cancela el hilo de imágenes, abre `/data/psbrowser/downloads/<nombre>.part`, `FileSink::write` escribe con `fwrite` (búfer de 256 KB) y llama a `dlTick()` cada ~300 ms: velocidad (media móvil), `SDL_PollEvent` (**○ = botón 1 cancela**; `SDL_QUIT` cancela y reenvía el evento) y `present()` con el recuadro `drawDownload`. Al terminar renombra `.part`→definitivo y anota en `/data/psbrowser/downloads.txt` (`nombre\tbytes\turl`). Fallos: borra el `.part` y muestra "Descarga fallida" con la causa y `[Reintentar]`. Detecta: HTTP no 2xx (403/429/503 → pista de Cloudflare/captcha/sesión), página HTML en vez del archivo, descarga incompleta (`received < Content-Length`), error de disco.
+  - Páginas internas `about:downloads` (lista, `[borrar]` = `psb:deldl:N` borra el archivo) y `about:images` (imágenes de la última página web con imágenes, guardadas por `captureImages` en `setPage`; cada enlace lleva a la URL de la imagen → confirmación → descarga). Enlaces en `about:home`. Atajo teclado **Ctrl+J** = descargas.
+- **No hace** (a propósito o por limitación): segundo plano/cola, reanudar, Referer/cookies (algunos hosts exigen Referer o sesión), cancelar con teclado/ratón (solo mando/○), cancelar mientras el servidor no envía datos, comprobar espacio libre (si se llena el disco, falla la escritura y se avisa), **resolver Cloudflare/captcha** (necesita JavaScript; ver §7.4–7.5).
+
 ## 7. Roadmap (el usuario quiere, en este orden de interés)
 1. ~~Rendimiento~~ y ~~teclado en pantalla~~: hechos y aprobados. Opcional más adelante: rectángulos sucios para pasar de ~15 a 30+ fps.
 2. **Compatibilidad con páginas (sin JS)** — en curso:
@@ -91,7 +110,8 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
    - **B. Portar NetSurf** (libcss + layout reales, sin JS): mejor fidelidad CSS 2.1, gran esfuerzo y riesgo en OpenOrbis; no probable de compilar sin red/toolchain local.
    - **C. Servidor de renderizado remoto** (Playwright/Chromium en PC/móvil/VPS del usuario): la PS4 pide `/render?url=…`, recibe teselas PNG de la página real (con JS) más un mapa JSON de zonas clicables/campos, y envía clics/teclas de vuelta. Única vía para Reddit y webs SPA y "como son"; también podría servir vídeo (transcodificado a H.264/MJPEG). Requiere un equipo encendido y conexión; latencia por página. Reutiliza `http_get` (HTTP plano en LAN) y el decodificador PNG/JPEG ya probados. Aún no escrito.
 5. **Sitios con mucho JavaScript:** servidor intermedio en PC/móvil del usuario. Proyecto aparte.
-6. Descargas, caché en disco, historial persistente; NetSurf a largo plazo.
+6. ~~Descargas~~: hechas en v0.6.0 en primer plano (**falta probarlas en PS4**). Pendiente/idea: cola o segundo plano, reanudar, Referer, comprobar espacio libre, **WebP/SVG/ICO/GIF** (67 WebP fallan en el log de 0.5.2), caché en disco, historial persistente; NetSurf a largo plazo.
+7. **Descargas tras Cloudflare/captcha:** no son posibles en la consola (hace falta JS y huella de navegador; `cf_clearance` copiada de un PC no es fiable: atada a IP/UA y a veces a la huella TLS). Vía realista = servidor intermedio (§7.4-C): el usuario resuelve el desafío a mano en un navegador real y el servidor sirve el archivo por la LAN. No se añadirá resolución automática de captchas.
 
 ## 8. Cómo compilar localmente (replicando el CI)
 1. Descargar y descomprimir el toolchain; `export OO_PS4_TOOLCHAIN=<ruta>/OpenOrbis/PS4Toolchain`.
@@ -100,16 +120,17 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 4. Un banco de pruebas en PC (SDL2 + stubs de `orbis/libkernel.h` y `keyboard.h`) sirve para ejecutar la lógica sin consola; `tools/render_host.cpp` renderiza páginas a PNG.
 
 ## 9. Limitaciones conocidas
-Sin JavaScript, sin vídeo/audio, sin CSS (salvo color en línea y `display:none`), sin cookies/caché/descargas, imágenes solo PNG/JPEG/BMP (sin GIF, SVG, WebP ni ICO), carga de páginas bloqueante, ~15 fps, charsets no latinos sin soporte, formularios sin multipart, índices de botones del mando 8/9/18/19 sin confirmar.
+Sin JavaScript, sin vídeo/audio (las descargas de `.mp4/.webm` directos guardan el archivo pero no se reproducen), sin CSS (salvo color en línea y `display:none`), sin cookies ni Referer, sin caché en disco, imágenes solo PNG/JPEG/BMP (sin WebP, GIF, SVG ni ICO), carga de páginas bloqueante, ~15 fps, charsets no latinos sin soporte, formularios sin multipart, índice de botón 8 del mando sin confirmar (9 sí aparece), 17/18/19 sin identificar. Descargas: solo en primer plano, una a la vez, cancelar solo con ○ del mando.
 
-## 10. Git (cuando haya cambios)
+## 10. Git (v0.6.0)
+Archivos nuevos: `app/download.h`, `app/download.cpp`, `tools/stubs/`, `tools/tests/`. Cambiados: `app/main.cpp`, `app/netclient.h`, `app/netclient.cpp`, `README.md`, `docs/CONTEXTO.md`, `docs/PRUEBAS.md`, `tools/README.md`. **El workflow no cambia** (copia `app/*.cpp` y `app/*.h`).
 ```bash
 cd Sackso_PS4_Browser_Testing-main
-git add -A app docs tools third_party .github
-git commit -m "v0.5.1: gzip, charsets, POST real, cabeceras y inventario del toolchain"
+git add -A app docs tools third_party .github README.md
+git commit -m "v0.6.0: descargas en primer plano (archivos, imagenes, video directo), about:downloads, about:images"
 git push
 ```
-Después: Actions → **Build PKG** → *Run workflow* → instalar el PKG → devolver `/data/psbrowser/log.txt` (y el zip `logs` aunque compile bien: trae `toolchain_inventory.txt`).
+Después: Actions → **Build PKG** → *Run workflow* → instalar el PKG → probar según `docs/PRUEBAS.md` («Prueba v0.6.0») → devolver `/data/psbrowser/log.txt` (y el zip `logs` aunque compile bien, y `downloads.txt` si hay).
 
 ## 11. Prompt sugerido para una IA nueva
-"Continúa el proyecto psbrowser (navegador homebrew para PS4, OpenOrbis). Lee `docs/CONTEXTO.md` del zip adjunto. v0.5.0 está probada y funciona muy bien (pestañas, imágenes PNG/JPEG, formularios, teclado en pantalla, rendimiento aprobado). v0.5.1 (gzip, charsets, POST) está sin probar. Lo siguiente: verificar v0.5.1 con mi log, seguir con compatibilidad (cookies, SVG, WebP, GIF, CSS básico) y después el experimento de vídeo con libSceAvPlayer. Responde en español, sé honesto sobre lo no probado o no compilado, pídeme `log.txt` antes de tocar mapeos de entrada y dame los comandos `git` exactos si cambias el workflow."
+"Continúa el proyecto psbrowser (navegador homebrew para PS4, OpenOrbis). Lee `docs/CONTEXTO.md` del zip adjunto. v0.5.2 está probada en consola (pestañas, imágenes PNG/JPEG, formularios GET/POST, teclado en pantalla, gzip transparente). v0.6.0 añade descargas en primer plano y está sin probar en PS4: lo primero es verificarla con mi `log.txt` (líneas `[dl]`). Después, según el roadmap: WebP/SVG/ICO/GIF (67 WebP fallan), cookies, CSS básico, y el experimento de vídeo con libSceAvPlayer. Responde en español, sé honesto sobre lo no probado o no compilado, pídeme `log.txt` antes de tocar mapeos de entrada, dame los comandos `git` exactos si cambias archivos y entrégame cada vez un `CONTEXTO.md` actualizado."

@@ -5,7 +5,9 @@ JavaScript moderno). Mientras tanto, el repo avanza por fases pequeñas que se p
 
 > Uso personal / aprendizaje. Reutiliza el toolchain y el CI que ya funcionaron en el proyecto de Ren'Py para PS4.
 
-## Estado actual: v0.4.1 (probada en PS4: pestañas, imágenes PNG/JPEG, formularios GET; ver `docs/CONTEXTO.md`)
+## Estado actual: v0.6.0 (descargas de archivos, imágenes y vídeos directos; **sin probar en PS4**). La última versión probada en consola es la v0.5.2: pestañas, imágenes PNG/JPEG, formularios, teclado en pantalla, POST. Ver `docs/CONTEXTO.md`.
+
+Descargas (v0.6.0): abrir un enlace a un archivo, imagen o `.mp4` muestra una página de confirmación; **Descargar** guarda en `/data/psbrowser/downloads/` con barra de progreso (cancelar = botón O). `about:downloads` (Ctrl+J) lista y borra; `about:images` lista las imágenes de la última página. No resuelve Cloudflare/captcha (sin JavaScript).
 
 ## Histórico: fase 1a (visor con enlaces, barra de URL, historial, teclado y ratón)
 
@@ -38,7 +40,7 @@ Título: `PS Browser` · Title ID: `PSBR00001` · Content ID: `IV0000-PSBR00001_
 ## Estructura
 
 ```
-app/            código de la app (main, cliente HTTP, canvas/texto, HTML→texto)
+app/            código de la app (main, cliente HTTP, descargas, canvas/texto, HTML→texto)
 third_party/    font8x8_basic.h (dominio público; tipo cambiado a unsigned char para C++)
 docs/           PLAN.md (fases y decisiones), NETSURF.md (ruta a NetSurf), PRUEBAS.md (qué probar y qué logs enviar)
 .github/workflows/build-pkg.yml

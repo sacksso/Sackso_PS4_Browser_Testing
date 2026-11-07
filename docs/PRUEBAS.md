@@ -68,3 +68,14 @@ salen como `?` salvo vocales acentuadas/ñ, que se convierten a su letra base.
 3. Marcar una página con `+` o Ctrl+D; verla en `B` (`about:bookmarks`).
 4. Visitar una página con `<video>`/`<iframe>`: debe salir `[video]` o `[video incrustado]` con la URL en la barra de estado (aún no se reproduce).
 5. Devolver `log.txt` (buscar líneas `rueda:` y `[refresh]`).
+
+## Prueba v0.6.0: descargas (sin probar en PS4)
+Instala el PKG y devuelve `/data/psbrowser/log.txt` (busca lineas `[dl]`, `[http] ... (solo cabeceras)`), el zip `logs` del CI y, si hay, el contenido de `/data/psbrowser/downloads.txt`.
+1. **Archivo directo:** abre un enlace a un `.zip`/`.pdf`/`.pkg` pequeno (p. ej. algun release de GitHub). Debe salir "Descargar archivo" con nombre, tipo y tamano. X sobre **[ Descargar ]** (ya viene seleccionado) -> recuadro "Descargando" con barra, velocidad y tiempo restante -> `about:downloads`.
+2. **Cancelar:** durante una descarga grande pulsa **O (boton 1)**: debe volver con "Descarga cancelada" y sin dejar archivo `.part`. (Si el servidor no envia datos durante unos segundos, la cancelacion tarda: no se atiende hasta el siguiente trozo.)
+3. **Imagen:** abre la URL directa de una imagen PNG/JPEG (o `Imagenes de la ultima pagina` desde `about:downloads` tras visitar una pagina con imagenes): vista previa + Descargar. Con WebP/GIF/SVG no hay vista previa (aun no se decodifican) pero se descargan igual.
+4. **Video directo:** un enlace `.mp4`/`.webm`. Descarga (no reproduce). `.m3u8`/`.mpd` muestra el aviso de streaming.
+5. **Archivo grande (>100 MB):** comprueba que la barra avanza, que la velocidad es razonable y que la interfaz no se queda "colgada" (se redibuja cada ~300 ms).
+6. **Errores:** enlace roto (404), descarga detras de Cloudflare/captcha (403/503 o una pagina HTML en vez del archivo): debe salir "Descarga fallida" con la causa y [ Reintentar ].
+7. `about:downloads` (o Ctrl+J con teclado): `[ borrar ]` borra el archivo de verdad.
+Cosas que no se pueden saber sin consola: velocidad real, disco lleno, si `rename` funciona en `/data`, si el servidor corta sin `Content-Length`.

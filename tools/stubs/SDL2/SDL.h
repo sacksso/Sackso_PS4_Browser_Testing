@@ -1,0 +1,25 @@
+#pragma once
+#include <cstdint>
+typedef uint32_t Uint32;
+struct SDL_Window; struct SDL_Renderer; struct SDL_Texture; struct SDL_Joystick;
+struct SDL_Rect { int x, y, w, h; };
+enum { SDL_QUIT = 0x100, SDL_JOYAXISMOTION = 0x600, SDL_JOYHATMOTION = 0x602, SDL_JOYBUTTONDOWN = 0x603 };
+enum { SDL_HAT_UP = 1, SDL_HAT_RIGHT = 2, SDL_HAT_DOWN = 4, SDL_HAT_LEFT = 8 };
+enum { SDL_INIT_VIDEO = 0x20, SDL_INIT_JOYSTICK = 0x200, SDL_INIT_EVENTS = 0x4000 };
+enum { SDL_RENDERER_SOFTWARE = 1 };
+enum { SDL_PIXELFORMAT_ARGB8888 = 1 };
+enum { SDL_TEXTUREACCESS_STATIC = 0, SDL_TEXTUREACCESS_STREAMING = 1 };
+enum { SDL_BLENDMODE_BLEND = 1 };
+struct SDL_JoyButtonEvent { uint32_t type; uint8_t which; uint8_t button; };
+struct SDL_JoyHatEvent { uint32_t type; uint8_t hat; uint8_t value; };
+struct SDL_JoyAxisEvent { uint32_t type; uint8_t axis; int16_t value; };
+union SDL_Event { uint32_t type; SDL_JoyButtonEvent jbutton; SDL_JoyHatEvent jhat; SDL_JoyAxisEvent jaxis; };
+int SDL_Init(uint32_t); int SDL_InitSubSystem(uint32_t); const char* SDL_GetError();
+SDL_Window* SDL_CreateWindow(const char*, int, int, int, int, uint32_t);
+SDL_Renderer* SDL_CreateRenderer(SDL_Window*, int, uint32_t);
+SDL_Texture* SDL_CreateTexture(SDL_Renderer*, uint32_t, int, int, int);
+int SDL_SetTextureBlendMode(SDL_Texture*, int);
+int SDL_UpdateTexture(SDL_Texture*, const SDL_Rect*, const void*, int);
+int SDL_RenderClear(SDL_Renderer*); int SDL_RenderCopy(SDL_Renderer*, SDL_Texture*, const SDL_Rect*, const SDL_Rect*); void SDL_RenderPresent(SDL_Renderer*);
+int SDL_PollEvent(SDL_Event*); int SDL_PushEvent(SDL_Event*); uint32_t SDL_GetTicks(); void SDL_Delay(uint32_t);
+int SDL_NumJoysticks(); SDL_Joystick* SDL_JoystickOpen(int); const char* SDL_JoystickName(SDL_Joystick*);

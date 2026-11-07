@@ -118,9 +118,13 @@ static std::string resolveUrl(const std::string& base, const std::string& loc) {
 }
 
 // compat=true: conexion sin keep-alive y con cabeceras Accept / Accept-Encoding explicitas (reintento tras un fallo en sendRequest).
-static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, std::string& redirectTo, bool compat) {
+static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, std::string& redirectTo, bool compat,
+                      HttpSink* sink, HttpGate gate) {
     redirectTo.clear();
     out.stage.clear();
+    out.contentDisposition.clear();
+    out.contentLength = -1;
+    out.stopped = false;
     out.sceError = 0;
     int tpl = 0, conn = 0, req = 0;
     bool ok = false;
@@ -156,6 +160,10 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
     if (compat) {
         sceHttpAddRequestHeader(req, "Accept", "text/html,*/*;q=0.8", 0);
         sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 0);
+    } else if (sink) {  // descarga de un archivo: tal cual, sin recompresion
+        sceHttpAddRequestHeader(req, "Accept", "*/*", 0);
+        sceHttpAddRequestHeader(req, "Accept-Language", "es-ES,es;q=0.9,en;q=0.7", 0);
+        sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 0);
     } else {
         sceHttpAddRequestHeader(req, "Accept", "text/html,application/xhtml+xml,image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5", 0);
         sceHttpAddRequestHeader(req, "Accept-Language", "es-ES,es;q=0.9,en;q=0.7", 0);
@@ -175,6 +183,7 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
         if (sceHttpGetAllResponseHeaders(req, &hdrs, &hdrLen) >= 0 && hdrs) {
             out.contentType = headerValue(hdrs, hdrLen, "Content-Type");
             encoding = headerValue(hdrs, hdrLen, "Content-Encoding");
+            out.contentDisposition = headerValue(hdrs, hdrLen, "Content-Disposition");
             // Registro de las cabeceras (hasta ~1500 bytes, en trozos) para diagnosticar.
             std::string h(hdrs, hdrLen > 1500 ? 1500 : hdrLen);
             for (auto& c : h) if (c == '\r') c = ' '; else if (c == '\n') c = '|';
@@ -190,11 +199,19 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
         if (!redirectTo.empty()) { ok = true; goto done; }
 
         out.body.clear();
+        out.received = 0;
+        if (gate && !gate(out)) { out.stopped = true; ok = true; goto done; }  // solo cabeceras
+        if (sink && !sink->begin(out)) { out.stage = "cancelado"; out.sceError = -2; goto done; }
         std::vector<uint8_t> buf(32 * 1024);
         for (;;) {
             int n = sceHttpReadData(req, buf.data(), static_cast<uint32_t>(buf.size()));
             if (n < 0) { fail("readData", n); goto done; }
             if (n == 0) break;
+            if (sink) {
+                out.received += n;
+                if (!sink->write(buf.data(), static_cast<size_t>(n))) { out.stage = "cancelado"; out.sceError = -2; goto done; }
+                continue;
+            }
             if (out.body.size() + n > maxBody) {
                 out.body.append(reinterpret_cast<char*>(buf.data()), maxBody - out.body.size());
                 out.truncated = true;
@@ -203,7 +220,7 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
             out.body.append(reinterpret_cast<char*>(buf.data()), n);
         }
         // Cuerpo comprimido: se descomprime aqui. Si el sistema ya lo descomprimio (sin la marca gzip), se deja tal cual.
-        if (!encoding.empty() && out.body.size() > 2) {
+        if (!sink && !encoding.empty() && out.body.size() > 2) {
             const bool gz = static_cast<unsigned char>(out.body[0]) == 0x1f && static_cast<unsigned char>(out.body[1]) == 0x8b;
             std::string e;
             for (char c : encoding) e += static_cast<char>(c >= 'A' && c <= 'Z' ? c + 32 : c);
@@ -228,7 +245,8 @@ done:
     return ok;
 }
 
-bool http_request(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, int maxRedirects) {
+bool http_request(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, int maxRedirects, HttpSink* sink,
+                  HttpGate gate) {
     static std::mutex httpMutex;  // libSceHttp se usa desde el hilo principal y el de imagenes: una peticion a la vez
     std::lock_guard<std::mutex> httpLock(httpMutex);
     out = HttpResult();
@@ -238,15 +256,15 @@ bool http_request(const std::string& url, const HttpPost* post, HttpResult& out,
         out.finalUrl = cur;
         std::string next;
         psb_log("[http] %s %s", post ? "POST" : "GET", cur.c_str());
-        bool good = singleGet(cur, post, out, maxBody, next, false);
+        bool good = singleGet(cur, post, out, maxBody, next, false, sink, gate);
         if (!good && (out.stage == "sendRequest" || out.stage == "decode")) {
             psb_log("[http] reintento en modo compat (sin keep-alive, Accept-Encoding: identity)");
-            good = singleGet(cur, post, out, maxBody, next, true);
+            good = singleGet(cur, post, out, maxBody, next, true, sink, gate);
             psb_log("[http] reintento: %s", good ? "OK" : "FALLO tambien");
         }
         if (!good) return false;
-        psb_log("[http] -> %d tipo='%s' longitud=%lld cuerpo=%zu bytes", out.status, out.contentType.c_str(),
-                out.contentLength, out.body.size());
+        psb_log("[http] -> %d tipo='%s' longitud=%lld cuerpo=%zu bytes%s", out.status, out.contentType.c_str(),
+                out.contentLength, sink ? static_cast<size_t>(out.received) : out.body.size(), out.stopped ? " (solo cabeceras)" : "");
         if (next.empty()) return true;
         cur = resolveUrl(cur, next);
         out.redirects++;

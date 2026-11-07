@@ -1,10 +1,10 @@
-// psbrowser v0.5.2 - "navegador de escritorio" para PS4: pestanas, barra de herramientas con omnibox, tema claro/oscuro,
+// psbrowser v0.6.0 - "navegador de escritorio" para PS4: pestanas, barra de herramientas con omnibox, tema claro/oscuro,
 // fuente TrueType proporcional, scroll suave en pixeles, imagenes (hilo aparte), formularios GET, anclas y configuracion.
 //
 // Teclado USB: Ctrl+T pestana nueva, Ctrl+W cerrar, Ctrl+RePag/AvPag o Ctrl+Tab cambiar; F6 o Ctrl+L = barra de direcciones;
 //   Tab / Shift+Tab = siguiente/anterior enlace o campo; Enter = activar (en un campo de texto: enviar el formulario);
 //   Backspace o Alt+Izq = atras; Alt+Der = adelante; F5 = recargar; F10 = configuracion; Ctrl+D = marcador;
-//   Ctrl+'+' / Ctrl+'-' / Ctrl+0 = zoom del texto; flechas, RePag, AvPag, Inicio, Fin, Espacio = desplazar.
+//   Ctrl+J = descargas; Ctrl+'+' / Ctrl+'-' / Ctrl+0 = zoom del texto; flechas, RePag, AvPag, Inicio, Fin, Espacio = desplazar.
 // Raton USB: clic = enlaces/botones/pestanas; clic central en un enlace = pestana nueva; clic derecho = atras; rueda = desplazar;
 //   la barra de desplazamiento se arrastra.
 // Mando (SDL): cruceta = foco/atras/adelante; boton 0 = activar, 1 = atras, 2 = recargar, 3 = inicio, 4/5 = pagina; stick = scroll.
@@ -36,6 +36,7 @@
 #include "textengine.h"
 #include "theme.h"
 #include "url.h"
+#include "download.h"
 // Lo piden los .h/.cpp de los samples de OpenOrbis (log.h): ellos lo declaran y el programa lo define.
 std::stringstream debugLogStream;
 static FILE* g_log = nullptr;
@@ -61,7 +62,7 @@ static const int TABBAR_H = 40, TOOLBAR_Y = 40, TOOLBAR_H = 48, VIEW_Y = 88, SBA
 static const int VIEW_H = H - VIEW_Y;
 // Codigos de tecla USB HID (los mismos que usa OpenOrbis en orbis/_types/keyboard.h).
 enum {
-    K_D = 7, K_L = 15, K_T = 23, K_W = 26, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
+    K_D = 7, K_J = 13, K_L = 15, K_T = 23, K_W = 26, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
     K_MINUS = 45, K_EQUAL = 46, K_F5 = 62, K_F6 = 63, K_F10 = 67, K_HOME = 74, K_PGUP = 75, K_END = 77, K_PGDOWN = 78,
     K_RIGHT = 79, K_LEFT = 80, K_DOWN = 81, K_UP = 82
 };
@@ -214,6 +215,7 @@ static std::string genHome() {
         "<html><head><title>Inicio</title></head><body><h1>psbrowser</h1>"
         "<form action=\"https://html.duckduckgo.com/html/\" method=\"get\">"
         "<input type=\"text\" name=\"q\" placeholder=\"Buscar con DuckDuckGo\"> <input type=\"submit\" value=\"Buscar\"></form>"
+        "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:images\">Imagenes de la ultima pagina</a></p>"
         "<h2>Marcadores</h2>";
     if (g_bookmarks.empty()) h += "<p>Aun no hay marcadores: pulsa la estrella de la barra (o Ctrl+D) en una pagina.</p>";
     else {
@@ -271,9 +273,99 @@ static std::string genBookmarks() {
     h += "</ul><p><a href=\"about:home\">Inicio</a> | <a href=\"about:settings\">Configuracion</a></p></body></html>";
     return h;
 }
+// ------------------------------------------------------------------ descargas: datos y paginas internas
+static const char* kDlDir = "/data/psbrowser/downloads";
+static const char* kDlList = "/data/psbrowser/downloads.txt";  // una linea por archivo: nombre \t bytes \t url
+struct DlItem {
+    std::string name;
+    long long bytes = 0;
+    std::string url;
+};
+static std::vector<DlItem> g_dls;
+struct DlPending {  // lo que vio la puerta de cabeceras de la ultima pagina de confirmacion
+    std::string url, name, type;
+    long long len = -1;
+};
+static DlPending g_pend;
+struct DlProgress {  // descarga en primer plano
+    bool active = false, cancel = false;
+    std::string name;
+    long long done = 0, total = -1;
+    float speed = 0;  // bytes/s (media movil)
+    uint32_t lastDraw = 0, lastSpeedT = 0;
+    long long lastSpeedB = 0;
+};
+static DlProgress g_dlp;
+static std::vector<std::pair<std::string, std::string>> g_lastImgs;  // (URL absoluta, alt) de la ultima pagina web con imagenes
+static std::string g_lastImgsPage;
+static bool g_skipCapture = false;  // la pagina de confirmacion de descarga no sustituye a la lista de imagenes
+static void dlListSave() {
+    FILE* f = fopen(kDlList, "w");
+    if (!f) return;
+    for (const DlItem& d : g_dls) fprintf(f, "%s\t%lld\t%s\n", d.name.c_str(), d.bytes, d.url.c_str());
+    fclose(f);
+}
+static void dlListLoad() {
+    FILE* f = fopen(kDlList, "r");
+    if (!f) return;
+    char line[2200];
+    while (fgets(line, sizeof(line), f)) {
+        std::string t(line);
+        while (!t.empty() && (t.back() == '\n' || t.back() == '\r')) t.pop_back();
+        const size_t t1 = t.find('\t');
+        if (t1 == std::string::npos) continue;
+        const size_t t2 = t.find('\t', t1 + 1);
+        if (t2 == std::string::npos) continue;
+        DlItem d;
+        d.name = t.substr(0, t1);
+        d.bytes = atoll(t.substr(t1 + 1, t2 - t1 - 1).c_str());
+        d.url = t.substr(t2 + 1);
+        if (!d.name.empty()) g_dls.push_back(d);
+    }
+    fclose(f);
+}
+static std::string genDownloads() {
+    std::string h = "<html><head><title>Descargas</title></head><body><h1>Descargas</h1><p>Los archivos se guardan en " + std::string(kDlDir) +
+                    "/ de la consola.</p>";
+    if (g_dls.empty()) {
+        h += "<p>Aun no hay descargas. Abre un enlace a un archivo (zip, pkg, pdf, mp4...) o a una imagen y elige Descargar.</p>";
+    } else {
+        h += "<ul>";
+        for (size_t i = g_dls.size(); i-- > 0;)  // la mas reciente arriba
+            h += "<li><b>" + htmlEscape(g_dls[i].name) + "</b> - " + dl_format_size(g_dls[i].bytes) + " <a href=\"psb:deldl:" + std::to_string(i) +
+                 "\">[ borrar ]</a><br>" + htmlEscape(g_dls[i].url) + "</li>";
+        h += "</ul>";
+    }
+    h += "<p><a href=\"about:images\">Imagenes de la ultima pagina</a> | <a href=\"about:home\">Inicio</a> | <a href=\"about:settings\">Configuracion</a></p></body></html>";
+    return h;
+}
+static std::string genImages() {
+    std::string h = "<html><head><title>Imagenes de la pagina</title></head><body><h1>Imagenes de la ultima pagina</h1>";
+    if (g_lastImgs.empty()) {
+        h += "<p>Todavia no hay imagenes: abre una pagina con imagenes y vuelve aqui.</p>";
+    } else {
+        h += "<p>" + htmlEscape(g_lastImgsPage) + "</p><p>Abre una para verla y descargarla.</p><ul>";
+        for (const auto& im : g_lastImgs) {
+            std::string label = im.second;
+            if (label.empty()) {
+                const std::string path = im.first.substr(0, im.first.find_first_of("?#"));
+                const size_t sl = path.rfind('/');
+                label = sl == std::string::npos ? im.first : path.substr(sl + 1);
+                if (label.empty()) label = im.first;
+            }
+            if (label.size() > 90) label.resize(90);
+            h += "<li><a href=\"" + htmlEscape(im.first) + "\">" + htmlEscape(label) + "</a></li>";
+        }
+        h += "</ul>";
+    }
+    h += "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:home\">Inicio</a></p></body></html>";
+    return h;
+}
 static std::string genInternal(const std::string& url) {
     if (url == "about:settings") return genSettings();
     if (url == "about:bookmarks") return genBookmarks();
+    if (url == "about:downloads") return genDownloads();
+    if (url == "about:images") return genImages();
     if (url == "about:blank") return "<html><head><title>Pestana nueva</title></head><body></body></html>";
     return genHome();
 }
@@ -285,16 +377,6 @@ static bool containsCI(const std::string& s, const char* sub) {
     std::string a = s;
     for (auto& c : a) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return a.find(sub) != std::string::npos;
-}
-static bool isMediaUrl(const std::string& url) {
-    std::string p = url.substr(0, url.find_first_of("?#"));
-    for (auto& c : p) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    static const char* ext[] = {".mp4", ".m3u8", ".webm", ".mkv", ".mov", ".avi", ".mp3", ".m4a", ".ogg", ".flv"};
-    for (const char* e : ext) {
-        size_t n = std::strlen(e);
-        if (p.size() >= n && p.compare(p.size() - n, n, e) == 0) return true;
-    }
-    return false;
 }
 // ------------------------------------------------------------------ documento de una pestana
 static int maxScroll(const Browser& b) { return std::max(0, b.doc.height - VIEW_H + 24); }
@@ -314,11 +396,27 @@ static void layoutDoc(Browser& b) {
     b.editField = -1;
     buildFocusIndex(b);
 }
+// Guarda las URLs de las imagenes de la pagina para "Imagenes de la ultima pagina" (descargarlas una a una).
+static void captureImages(const Browser& b) {
+    std::vector<std::pair<std::string, std::string>> v;
+    std::map<std::string, bool> seen;
+    for (const ImageRef& im : b.doc.images) {
+        const std::string u = urlResolve(b.url, im.src);
+        if (!urlIsHttp(u) || seen.count(u)) continue;
+        seen[u] = true;
+        v.push_back({u, im.alt});
+        if (v.size() >= 400) break;
+    }
+    if (v.empty()) return;
+    g_lastImgs.swap(v);
+    g_lastImgsPage = b.url;
+}
 static void setPage(Browser& b, const std::string& url, std::string html, int kind) {
     b.url = url;
     b.html = std::move(html);
     b.kind = kind;
     layoutDoc(b);
+    if (kind == 0 && !g_skipCapture && !isInternal(url)) captureImages(b);
     b.scrollY = 0;
     b.scrollTarget = 0;
     g_dirty = true;
@@ -463,6 +561,161 @@ static void saveLeaving(Browser& b) {
     e.html = std::move(b.html);  // b.html se vuelve a rellenar al cargar la pagina siguiente
     b.html.clear();
 }
+// ------------------------------------------------------------------ descargas: red, disco y progreso (primer plano)
+static std::string fmtTime(long long secs) {
+    char t[32];
+    if (secs < 0) secs = 0;
+    if (secs >= 3600) snprintf(t, sizeof(t), "%lld:%02lld:%02lld", secs / 3600, (secs / 60) % 60, secs % 60);
+    else snprintf(t, sizeof(t), "%lld:%02lld", secs / 60, secs % 60);
+    return t;
+}
+// Se llama con cada trozo recibido: cada ~300 ms recalcula la velocidad, atiende el mando (O = cancelar) y redibuja.
+static void dlTick() {
+    const uint32_t now = SDL_GetTicks();
+    if (now - g_dlp.lastDraw < 300) return;  // subir el lienzo cuesta ~60 ms: no hacerlo con cada trozo
+    const uint32_t dt = now - g_dlp.lastSpeedT;
+    if (dt > 0) {
+        const float inst = static_cast<float>(g_dlp.done - g_dlp.lastSpeedB) * 1000.0f / static_cast<float>(dt);
+        g_dlp.speed = g_dlp.speed <= 0 ? inst : g_dlp.speed * 0.7f + inst * 0.3f;
+    }
+    g_dlp.lastSpeedT = now;
+    g_dlp.lastSpeedB = g_dlp.done;
+    bool quit = false;
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) quit = true;
+        else if (e.type == SDL_JOYBUTTONDOWN && e.jbutton.button == 1) g_dlp.cancel = true;  // O
+    }
+    if (quit) {  // cerrar la aplicacion: cancela y devuelve el evento al bucle principal
+        g_dlp.cancel = true;
+        SDL_Event q;
+        memset(&q, 0, sizeof(q));
+        q.type = SDL_QUIT;
+        SDL_PushEvent(&q);
+    }
+    g_dlp.lastDraw = SDL_GetTicks();
+    present();
+}
+struct FileSink : HttpSink {
+    FILE* f = nullptr;
+    std::string partPath, finalPath, name;
+    bool diskError = false, htmlInstead = false, badStatus = false;
+    int status = 0;
+    ~FileSink() override { if (f) fclose(f); }
+    bool begin(const HttpResult& r) override {
+        status = r.status;
+        if (r.status < 200 || r.status >= 300) { badStatus = true; return false; }
+        // Se esperaba un archivo y llega una pagina web: enlace temporal, sesion caducada, verificacion (captcha/Cloudflare)...
+        if (!g_pend.type.empty() && !dl_is_page_type(g_pend.type) && dl_is_page_type(r.contentType)) { htmlInstead = true; return false; }
+        mkdir(kDlDir, 0777);
+        name = dl_filename(r.finalUrl, r.contentDisposition, r.contentType);
+        finalPath = dl_unique_path(kDlDir, name);
+        name = finalPath.substr(strlen(kDlDir) + 1);
+        partPath = finalPath + ".part";
+        f = fopen(partPath.c_str(), "wb");
+        if (!f) { diskError = true; return false; }
+        setvbuf(f, nullptr, _IOFBF, 256 * 1024);
+        g_dlp.name = name;
+        g_dlp.total = r.contentLength;
+        psb_log("[dl] %s -> %s (%s)", r.finalUrl.c_str(), finalPath.c_str(),
+                r.contentLength >= 0 ? dl_format_size(r.contentLength).c_str() : "tamano desconocido");
+        return true;
+    }
+    bool write(const void* d, size_t n) override {
+        if (fwrite(d, 1, n, f) != n) { diskError = true; return false; }
+        g_dlp.done += static_cast<long long>(n);
+        dlTick();
+        return !g_dlp.cancel;
+    }
+};
+// Descarga 'url' a /data/psbrowser/downloads/ (bloquea la interfaz con una barra de progreso). true = guardado.
+static bool runDownload(const std::string& url, std::string& err) {
+    imgw_cancel();
+    imgw_pause(true);  // el hilo de imagenes no debe competir por la red
+    g_dlp = DlProgress();
+    g_dlp.active = true;
+    const bool same = g_pend.url == url;
+    g_dlp.name = same && !g_pend.name.empty() ? g_pend.name : "archivo";
+    g_dlp.total = same ? g_pend.len : -1;
+    g_dlp.lastSpeedT = SDL_GetTicks();
+    g_loading = true;
+    present();
+    FileSink sink;
+    HttpResult res;
+    const bool ok = http_request(url, nullptr, res, 0, 8, &sink);
+    if (sink.f) { fclose(sink.f); sink.f = nullptr; }
+    g_dlp.active = false;
+    g_loading = false;
+    imgw_pause(false);
+    g_dirty = true;
+    bool good = ok && res.status >= 200 && res.status < 300;
+    if (good && res.contentLength >= 0 && res.received < res.contentLength) {
+        good = false;
+        err = "La descarga quedo incompleta (" + dl_format_size(res.received) + " de " + dl_format_size(res.contentLength) + "): se cerro la conexion.";
+    }
+    if (!good && err.empty()) {
+        char code[64];
+        snprintf(code, sizeof(code), "0x%08X", static_cast<unsigned>(res.sceError));
+        if (g_dlp.cancel) err = "Descarga cancelada.";
+        else if (sink.diskError) err = "No se pudo escribir en el disco (sin espacio o sin permisos).";
+        else if (sink.htmlInstead)
+            err = "El servidor devolvio una pagina web en vez del archivo: el enlace puede ser temporal, exigir iniciar sesion o una verificacion "
+                  "(captcha/Cloudflare) que este navegador no puede resolver.";
+        else if (sink.badStatus) {
+            err = "El servidor respondio HTTP " + std::to_string(sink.status) + ".";
+            if (sink.status == 403 || sink.status == 429 || sink.status == 503)
+                err += " Puede exigir verificacion (Cloudflare/captcha) o iniciar sesion; este navegador no ejecuta JavaScript y no puede resolverla.";
+        } else err = "Error de red en '" + res.stage + "' (codigo " + code + ").";
+    }
+    if (!good) {
+        if (!sink.partPath.empty()) remove(sink.partPath.c_str());
+        psb_log("[dl] fallo: %s", err.c_str());
+        return false;
+    }
+    if (rename(sink.partPath.c_str(), sink.finalPath.c_str()) != 0) {
+        remove(sink.partPath.c_str());
+        err = "No se pudo renombrar el archivo descargado.";
+        psb_log("[dl] fallo: %s", err.c_str());
+        return false;
+    }
+    DlItem it;
+    it.name = sink.name;
+    it.bytes = res.received;
+    it.url = res.finalUrl;
+    g_dls.push_back(it);
+    dlListSave();
+    psb_log("[dl] ok: %s (%lld bytes)", sink.finalPath.c_str(), res.received);
+    toast("Descargado: " + it.name + " (" + dl_format_size(it.bytes) + ")");
+    return true;
+}
+// Puerta de cabeceras de las paginas: lo que el visor no sabe mostrar (o que pide descargarse) no se lee, se ofrece guardar.
+static bool pageGate(const HttpResult& r) {
+    if (r.status < 200 || r.status >= 300) return true;  // errores HTTP: se muestran como pagina
+    if (dl_is_attachment(r.contentDisposition)) return false;
+    return dl_is_page_type(r.contentType);
+}
+// Pagina de confirmacion: nombre, tipo, tamano y [Descargar] (con vista previa si es PNG/JPEG/BMP).
+static void showDownloadPrompt(Browser& b, const HttpResult& r) {
+    const std::string url = r.finalUrl;
+    if (dl_is_streaming(r.contentType, url)) {
+        setPage(b, url, infoHtml("Video por segmentos (streaming)", "Esta lista reparte el video en muchos trozos y no se puede guardar como un solo archivo.", url), 0);
+        return;
+    }
+    g_pend.url = url;
+    g_pend.name = dl_filename(url, r.contentDisposition, r.contentType);
+    g_pend.type = r.contentType.empty() ? std::string("application/octet-stream") : r.contentType;
+    g_pend.len = r.contentLength;
+    std::string h = "<html><head><title>Descargar " + htmlEscape(g_pend.name) + "</title></head><body><h1>Descargar archivo</h1>";
+    if (dl_is_previewable_image(r.contentType)) h += "<p><img src=\"" + htmlEscape(url) + "\" width=\"640\" height=\"420\"></p>";
+    h += "<p>Nombre: <b>" + htmlEscape(g_pend.name) + "</b></p><p>Tipo: " + htmlEscape(dl_type_label(r.contentType)) + "</p><p>Tamano: " +
+         (r.contentLength >= 0 ? dl_format_size(r.contentLength) : std::string("desconocido")) + "</p><p>Se guardara en " + kDlDir + "/</p>" +
+         "<p><a href=\"psb:dlgo:" + htmlEscape(url) + "\">[ Descargar ]</a> <a href=\"psb:dlback\">[ Cancelar ]</a> <a href=\"about:downloads\">[ Ver descargas ]</a></p>" +
+         "<p>" + htmlEscape(url) + "</p></body></html>";
+    g_skipCapture = true;
+    setPage(b, url, h, 0);
+    g_skipCapture = false;
+    if (!b.doc.focus.empty()) b.sel = 0;  // [Descargar] ya queda seleccionado: X lo activa
+}
 // Cuerpo POST pendiente: lo deja submitForm y lo consume load() una sola vez (recargar o volver usan GET).
 static HttpPost g_post;
 static bool g_hasPost = false;
@@ -479,8 +732,8 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
         if (!frag.empty()) jumpAnchor(b, frag);
         return;
     }
-    if (isMediaUrl(url)) {
-        setPage(b, url, infoHtml("Video/audio aun no soportado", "Este enlace apunta a un archivo multimedia. La reproduccion todavia no esta implementada.", url), 0);
+    if (dl_is_streaming("", url)) {  // .m3u8 / .mpd
+        setPage(b, url, infoHtml("Video por segmentos (streaming)", "Esta lista reparte el video en muchos trozos y no se puede guardar como un solo archivo. Los .mp4 y .webm directos si se pueden descargar.", url), 0);
         return;
     }
     g_loading = true;
@@ -488,7 +741,7 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
     imgw_pause(true);   // y el hilo de imagenes no debe quitarle la red a la navegacion
     present();
     HttpResult res;
-    const bool ok = isPost ? http_request(url, &post, res, 2 * 1024 * 1024) : http_get(url, res, 2 * 1024 * 1024);
+    const bool ok = http_request(url, isPost ? &post : nullptr, res, 2 * 1024 * 1024, 5, nullptr, pageGate);
     imgw_pause(false);
     g_loading = false;
     if (!ok) {
@@ -496,6 +749,10 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
         snprintf(code, sizeof(code), "0x%08X", static_cast<unsigned>(res.sceError));
         setPage(b, url, infoHtml("No se pudo cargar la pagina", std::string("Paso: ") + res.stage + " - codigo " + code, url), 0);
         toast("Error al cargar la pagina", true);
+        return;
+    }
+    if (res.stopped) {  // archivo, imagen o video directo: pagina de confirmacion de descarga
+        showDownloadPrompt(b, res);
         return;
     }
     const std::string ct = res.contentType;
@@ -512,7 +769,7 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
     else if (containsCI(ct, "text/") || containsCI(ct, "json") || containsCI(ct, "xml")) setPage(b, finalUrl, std::move(res.body), 1);
     else {
         char info[220];
-        snprintf(info, sizeof(info), "Tipo no soportado: %s (%zu bytes). Aun no hay descargas ni este tipo de contenido.", ct.c_str(), bytes);
+        snprintf(info, sizeof(info), "Tipo de contenido no soportado: %s (%zu bytes).", ct.c_str(), bytes);
         setPage(b, finalUrl, infoHtml("Contenido no soportado", info, finalUrl), 0);
     }
     if (b.kind == 0 && !b.doc.refreshUrl.empty() && b.doc.lines.size() < 6 && depth < 3) {  // <meta refresh> en paginas casi vacias
@@ -624,6 +881,31 @@ static bool handleAction(Browser& b, const std::string& a) {
         const int prev = b.histPos - 1;
         if (prev >= 0) g_cfg.home = b.hist[prev].req; else g_cfg.home.clear();
     } else if (a == "homereset") g_cfg.home.clear();
+    else if (a.compare(0, 5, "dlgo:") == 0) {  // psb:dlgo:<url> = descargar (lo crea showDownloadPrompt)
+        const std::string url = a.substr(5);
+        if (g_pend.url != url) { g_pend = DlPending(); g_pend.url = url; }
+        std::string err;
+        if (runDownload(url, err)) { navigate(b, "about:downloads", true); return true; }
+        std::string h = "<html><head><title>Descarga fallida</title></head><body><h1>Descarga fallida</h1><p>" + htmlEscape(err) + "</p><p>" +
+                        htmlEscape(url) + "</p><p><a href=\"psb:dlgo:" + htmlEscape(url) + "\">[ Reintentar ]</a> <a href=\"psb:dlback\">[ Volver ]</a></p></body></html>";
+        g_skipCapture = true;
+        setPage(b, b.url, h, 0);
+        g_skipCapture = false;
+        if (!b.doc.focus.empty()) b.sel = 0;
+        toast(err.size() > 90 ? err.substr(0, 90) : err, true);
+        return true;
+    } else if (a == "dlback") {
+        if (b.histPos > 0) goBack(b); else navigate(b, homeUrl(), true);
+        return true;
+    } else if (a.compare(0, 6, "deldl:") == 0) {
+        const size_t i = static_cast<size_t>(atoi(a.c_str() + 6));
+        if (i < g_dls.size()) {
+            remove((std::string(kDlDir) + "/" + g_dls[i].name).c_str());
+            g_dls.erase(g_dls.begin() + i);
+            dlListSave();
+        }
+        cfg = false;
+    }
     else if (a.compare(0, 6, "delbm:") == 0) {
         size_t i = static_cast<size_t>(atoi(a.c_str() + 6));
         if (i < g_bookmarks.size()) { g_bookmarks.erase(g_bookmarks.begin() + i); bookmarksSave(); }
@@ -977,6 +1259,33 @@ static void drawBubble(Canvas& cv, Browser& b, uint32_t now) {
     cv.rrect(bx, by, bw, bh, 8, th.statusBg);
     te_draw(cv, bx + 14, baseFor(by, bh, FONT_SANS, px), t, FONT_SANS, px, false, bad ? th.bad : th.statusText);
 }
+static void drawDownload(Canvas& cv) {
+    const Theme& th = g_th;
+    const int bw = 820, bh = 230, bx = (W - bw) / 2, by = (H - bh) / 2;
+    cv.rrect(bx - 2, by - 2, bw + 4, bh + 4, 14, th.rule);
+    cv.rrect(bx, by, bw, bh, 12, th.toolbar);
+    te_draw(cv, bx + 30, by + 46, "Descargando", FONT_SANS, 24, true, th.text);
+    te_draw(cv, bx + 30, by + 84, te_fit(g_dlp.name, bw - 60, FONT_SANS, 18, false), FONT_SANS, 18, false, th.dim);
+    const int px = bx + 30, py = by + 110, pw = bw - 60, ph = 18;
+    cv.rrect(px, py, pw, ph, 9, th.scrollTrack);
+    if (g_dlp.total > 0) {
+        const float fr = std::min(1.0f, static_cast<float>(g_dlp.done) / static_cast<float>(g_dlp.total));
+        cv.rrect(px, py, std::max(ph, static_cast<int>(pw * fr)), ph, 9, th.accent);
+    } else {  // tamano desconocido: barra que se desliza
+        const int seg = 160;
+        const int off = static_cast<int>((SDL_GetTicks() / 6) % static_cast<uint32_t>(pw + seg)) - seg;
+        const int x0 = std::max(0, off), x1 = std::min(pw, off + seg);
+        if (x1 > x0) cv.rrect(px + x0, py, x1 - x0, ph, 9, th.accent);
+    }
+    std::string st = dl_format_size(g_dlp.done);
+    if (g_dlp.total > 0) st += " de " + dl_format_size(g_dlp.total) + " (" + std::to_string(static_cast<int>(100.0 * g_dlp.done / g_dlp.total)) + "%)";
+    if (g_dlp.speed > 1) {
+        st += "   -   " + dl_format_size(static_cast<long long>(g_dlp.speed)) + "/s";
+        if (g_dlp.total > g_dlp.done) st += "   -   faltan " + fmtTime(static_cast<long long>((g_dlp.total - g_dlp.done) / g_dlp.speed));
+    }
+    te_draw(cv, px, py + ph + 40, te_fit(st, pw, FONT_SANS, 18, false), FONT_SANS, 18, false, th.text);
+    te_draw(cv, px, by + bh - 26, "Cancelar: boton O (circulo) del mando", FONT_SANS, 16, false, th.dim);
+}
 static void drawFrame() {
     Canvas& cv = *g_cv;
     Browser& b = B;
@@ -1001,6 +1310,7 @@ static void drawFrame() {
     drawTabbar(cv, b);
     drawToolbar(cv, b);
     drawBubble(cv, b, SDL_GetTicks());
+    if (g_dlp.active) drawDownload(cv);
     if (g_osk.open) osk_draw(g_osk, cv, th, W, H, g_caret);
 }
 static void renderFrame() {
@@ -1109,6 +1419,7 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
             case K_TAB: activateTab(shift ? (g_cur + n - 1) % n : (g_cur + 1) % n); return;
             case K_L: startUrlEdit(b, isInternal(b.url) ? "" : b.url, true); return;
             case K_D: toggleBookmark(b); return;
+            case K_J: navigate(b, "about:downloads", true); return;
             case K_EQUAL: changeZoom(10); return;
             case K_MINUS: changeZoom(-10); return;
             case K_0: changeZoom(0, true); return;
@@ -1186,9 +1497,10 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.5.2 ==");
+    psb_log("== psbrowser v0.6.0 ==");
     configLoad();
     bookmarksLoad();
+    dlListLoad();
     g_th = g_cfg.dark ? themeDark() : themeLight();
     if (!te_init()) { psb_log("te_init FALLO (fuentes)"); return 1; }
     SDL_Init(0);
