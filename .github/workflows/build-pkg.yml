@@ -20,6 +20,10 @@ on:
         description: 'TLS estricto (rechaza certificados no validos). Por defecto true: en la prueba 1 todos los HTTPS dieron verifyErr=0'
         type: boolean
         default: true
+      probe_js:
+        description: 'Sonda de JavaScript: descarga QuickJS-ng y prueba a compilarlo con los flags de OpenOrbis (solo escribe logs/quickjs_probe.txt, no toca el PKG)'
+        type: boolean
+        default: true
 
 concurrency:
   group: build-pkg
@@ -159,6 +163,31 @@ jobs:
             echo "== samples"
             ls "$tc/samples" 2>/dev/null
           } > logs/toolchain_inventory.txt 2>&1 || true
+
+      # Sonda para el futuro soporte de JavaScript (no cambia el PKG): baja QuickJS-ng, lista sus archivos y API y prueba a
+      # compilar cada .c con los mismos flags que usa el Makefile de OpenOrbis. Con logs/quickjs_probe.txt se escribe el enlace real.
+      - name: Sonda de JavaScript (QuickJS-ng)
+        if: ${{ always() && inputs.probe_js }}
+        continue-on-error: true
+        run: |
+          set +e
+          out="$GITHUB_WORKSPACE/logs/quickjs_probe.txt"
+          mkdir -p "$GITHUB_WORKSPACE/logs"; : > "$out"
+          tag=$(gh api repos/quickjs-ng/quickjs/releases/latest --jq .tag_name 2>>"$out")
+          echo "tag: $tag" >> "$out"
+          git clone -q --depth 1 --branch "$tag" https://github.com/quickjs-ng/quickjs "$RUNNER_TEMP/qjs" >> "$out" 2>&1
+          cd "$RUNNER_TEMP/qjs" || exit 0
+          { echo "== archivos"; ls -la; echo "== lineas"; wc -l *.c *.h 2>/dev/null | tail -30
+            echo "== API clave"; grep -n -E "JS_NewRuntime|JS_SetInterruptHandler|JS_SetMemoryLimit|JS_SetMaxStackSize|JS_NewContext\b|JS_NewCFunction\b|QJS_VERSION|JS_ExecutePendingJob" quickjs.h | head -30
+            echo "== licencia"; head -5 LICENSE; } >> "$out" 2>&1
+          echo "== compilar cada .c con los flags de OpenOrbis (objetivo freebsd12)" >> "$out"
+          for f in *.c; do
+            case "$f" in qjs.c|qjsc.c|run-test262.c|unicode_gen.c|repl.c|quickjs-libc.c|gen_*.c|*test*|*example*|*fuzz*) continue;; esac
+            if clang --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c -O2 -w -isysroot "$OO_PS4_TOOLCHAIN" -isystem "$OO_PS4_TOOLCHAIN/include" -I. -o /dev/null "$f" >> "$out.tmp" 2>&1
+            then echo "OK   $f" >> "$out"; else echo "FALLA $f" >> "$out"; head -25 "$out.tmp" >> "$out"; fi
+            rm -f "$out.tmp"
+          done
+          cat "$out"
 
       - name: Subir logs
         if: always()
