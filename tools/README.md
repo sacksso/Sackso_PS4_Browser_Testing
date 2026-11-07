@@ -27,3 +27,19 @@ g++ -std=c++17 -pthread -fsanitize=address,undefined -Itools/stubs -Iapp tools/t
 g++ -std=c++17 -fsanitize=address,undefined -Iapp tools/tests/test_ico.cpp app/icodec.cpp -o /tmp/test_ico   # lo invoca tools/tests/ico_test.py
 python3 -I tools/tests/ico_test.py
 ```
+
+# v0.8.0 (video)
+```
+# compilar con el toolchain REAL (descargado, con clang/lld): replica el CI y deja eboot.bin en /tmp/psb_build/samples/psbrowser/
+OO_PS4_TOOLCHAIN=<ruta>/OpenOrbis/PS4Toolchain bash tools/build_local.sh
+# fuente de video por rangos HTTP (cache de bloques, lectura anticipada, errores, cierre): ASan/UBSan y TSan
+g++ -std=c++17 -pthread -fsanitize=address,undefined -Itools/stubs -Iapp tools/tests/test_vsource.cpp app/vsource.cpp -o /tmp/test_vs && /tmp/test_vs
+g++ -std=c++17 -pthread -fsanitize=thread -O1 -Itools/stubs -Iapp tools/tests/test_vsource.cpp app/vsource.cpp -o /tmp/test_vs_tsan && /tmp/test_vs_tsan
+```
+
+# v0.8.0: buscador de videos de la pagina
+```
+# scanVideos() (URLs .mp4/.m3u8/.webm en el HTML crudo, JSON escapado, &amp;, falsos positivos, pagina de 2 MB); ASan/UBSan
+sh tools/tests/run_scanvideos.sh
+```
+`vplayer.cpp` (libSceAvPlayer/libSceAudioOut) solo se comprueba con el toolchain real (`tools/build_local.sh`) y en la consola.

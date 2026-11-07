@@ -1,7 +1,46 @@
 # Contexto del proyecto psbrowser (para continuar en otro chat o con otra IA)
 
 > Pega este documento al inicio de una conversación nueva junto con el zip del repo (y, si los tienes, el último `log.txt` y el zip `logs` del CI). Idioma de trabajo: **español**.
-> Última actualización: 7 de noviembre de 2026 (**v0.6.0 probada en PS4: las descargas funcionan**; **v0.7.0 = v0.6.0 + menú contextual/portapapeles/atajos + descargas con hilo de disco + ICO + imágenes perezosas, sin probar en consola**: es el siguiente PKG a instalar). **JavaScript: aún no existe**; plan y límites en `docs/JS.md`.
+> Última actualización: 7 de noviembre de 2026 (**v0.8.0 = código completo: vídeo integrado + botón Salir + buscador de vídeos, SIN PROBAR en consola y sin compilar con el toolchain real en la última sesión**; v0.7.0 sigue sin probar en consola; v0.6.0 probada: descargas OK). **JavaScript: aún no existe** (`docs/JS.md`).
+
+
+---
+# >>> ESTADO v0.8.0 (VIDEO + SALIR) - CODIGO COMPLETO, SIN PROBAR - leer primero <<<
+> Actualizado el 7 de noviembre de 2026. El usuario pidio **"focus total" en reproducir video dentro del navegador** (streaming sin descargar, o descargando y viendolo desde el propio navegador) **y un boton de salir** con mando, raton y teclado. v0.7.0 tampoco se ha probado en consola.
+
+## A. Que hay (todo integrado en `app/main.cpp`, ~2480 lineas)
+1. **Reproductor** (`vplayer.*` sobre libSceAvPlayer + libSceAudioOut, `vsource.*` fuente por rangos HTTP con cache de bloques y lectura anticipada; ver §A-bis). **Interfaz** (`drawVideoUi`): pantalla completa negra con letterbox, titulo arriba, barra inferior (progreso clicable, `mm:ss / mm:ss`, botones -10 s / Pausa-Seguir / +10 s / Vol- / Vol+ / Cerrar, volumen), texto central de estado ("Almacenando en bufer N%", errores en rojo, "Sin imagen..." si pasan 8 s sin fotogramas), panel de estadisticas (I / boton 3), overlay que se oculta a los 3 s de inactividad. El bucle llama `vp_update()` y marca redibujo con fotograma nuevo, cambio de estado o reloj (250 ms). Mientras hay video: se pausa el hilo de imagenes y no se cargan paginas.
+2. **Controles de video:** teclado Espacio/K pausa, izq/der -+10 s, J/L -+30 s, arriba/abajo volumen, Inicio al principio, H calidad (mitad/completa), I informacion, Esc/Backspace/Q cierran; raton: clic en barra = saltar, botones, clic en el video = pausa, rueda = volumen, mover = mostrar controles; mando: 0 pausa, 1 cierra, 2 calidad, 3 informacion, 4/5 -+30 s, cruceta izq/der -+10 s y arriba/abajo volumen. Todo captura la entrada (como `g_ctx`/`g_osk`).
+3. **Puntos de entrada:** (a) pagina de confirmacion de descarga: si es video (`video/*` o `.mp4/.m4v/.mov/.webm/.mkv`, no `.m3u8`) aparecen **[ Reproducir sin descargar ]** (`psb:play:<url>`, ya seleccionado) y **[ Descargar y reproducir ]** (`psb:dlplay:<url>`), con aviso de que WebM/MKV probablemente falle; (b) `about:downloads`: `[ Reproducir ]` (`psb:playfile:N`) en cada video; (c) **`about:videos` (F8)**: `scanVideos()` busca a mano `.mp4 .m3u8 .webm .mov .m4v` en el HTML CRUDO (incluye URLs dentro de JavaScript/JSON), des-escapa `\/`, `\u0026`, `&amp;`, resuelve con `urlResolve`, deduplica (max 60) y avisa con un toast al cargar la pagina; (d) menu contextual: "Reproducir video" sobre enlaces con pinta de video, "Videos de la pagina (F8)". El Referer del video es la pagina desde la que se llego (`g_navReferer`/`g_pendRef`) o `g_lastVidsPage`.
+4. **Salir:** boton de apagado en la barra (`UI_POWER`, derecha del todo; el omnibox se estrecho 46 px), **Ctrl+Q**, enlace `psb:quit` (Inicio y Configuracion) y "Salir del navegador" en el menu contextual (el mando lo abre con el boton 11). Dialogo modal: **X o Intro/Y = salir, O o Esc/N = cancelar**, o clic en los botones. `hardExit()`: log, `vp_close()` si hay video, `imgw_pause(true)` y **`_exit(0)`**; un hilo vigilante fuerza `_exit(0)` a los 2,5 s si algo se atasca. No se usa `SDL_Quit` ni `net_shutdown` a proposito (riesgo de bloqueo con hilos vivos). **No verificado en consola**: puede que la PS4 muestre un aviso al salir asi; alternativa por probar: `sceSystemServiceLoadExec("exit")`.
+5. **Configuracion** (`config.txt`: `vdec=0|2|3`, `vhalf=1`, `volume=80`; enlaces `psb:vdec`, `psb:vhalf`, `psb:vol-/+` en `about:settings`, seccion "Video").
+6. CI: el `sed` de LIBS anade `-lSceAvPlayer -lSceAudioOut -lSceUserService`. `tools/build_local.sh` replica el CI con el toolchain real (`OO_PS4_TOOLCHAIN=... bash tools/build_local.sh`).
+
+## A-bis. Notas del reproductor (de la sesion anterior)
+`vplayer.cpp` (nunca ejecutado en consola) declara dentro las firmas/structs reales de AvPlayer (la cabecera del toolchain solo trae `void f();`; tomados de shadPS4, con `static_assert` de tamanos). Flujo: `VSource::open` -> `sceSysmoduleLoadModule(0xA5)` -> `sceUserServiceInitialize` + `sceAudioOutInit/Open(48000, S16 estereo)` -> `sceAvPlayerInit` (memoria directa WB_ONION para texturas, con fallback a malloc) -> opcional `sceAvPlayerPostInit` (decodificador software) -> `AddSource("psbrowser-video.mp4")` -> espera streams (hasta 40 s) -> PLAYING + hilo de audio. Todo se registra con prefijo **`[vp]`** y el primer fotograma se vuelca a `/data/psbrowser/video_frame0.bin`. `netclient`: `HttpExtra{rangeStart,rangeEnd,referer}`, `http_range()`; el mutex global serializa descargas, paginas, imagenes y video.
+
+## B. Verificacion hecha en la ultima sesion (SIN red: no se pudo bajar el toolchain)
+- `main.cpp` compila a objeto con `g++ -std=c++17 -c -O2 -Wall -Wextra` contra `tools/stubs` **sin avisos**; `tests/test_vsource` OK (ASan/UBSan). **No** se compilo ni enlazo con el toolchain real de OpenOrbis (el de la sesion anterior solo cubria `vplayer/vsource/netclient`, antes de integrar `main.cpp`): **el CI es la comprobacion**. Si falla, pasar `build.log`. Puntos con riesgo de compilacion: `std::thread` + `_exit` (`<unistd.h>` y `<thread>` incluidos), `snprintf` con `%lu` para `frames`.
+- `scanVideos()` se probo en PC (`sh tools/tests/run_scanvideos.sh`, ASan/UBSan): se corrigieron 3 defectos (descartaba URLs de <8 caracteres como `/a.mp4`; cortaba en el `;` de `&amp;`; ignoraba `src="video.mp4"` sin barra aunque estuviera entre comillas). Pagina de 2 MB sin videos: ~6 ms.
+- La interfaz de video, el dialogo de salida y las entradas **no se han ejecutado** (ni en PC ni en consola).
+
+## C. Riesgos e incognitas del video (decirlo SIEMPRE al usuario; nada probado)
+- Que `libSceAvPlayer` funcione desde un homebrew OpenOrbis con GoldHEN (modulo 0xA5, hilos internos, memoria). Si `sceAvPlayerInit` da NULL o la app se cierra: mirar el ultimo `[vp]` del `log.txt`.
+- **Formato de fotogramas**: se asume NV12 lineal con el `pitch` de `GetVideoDataEx`; podria venir en tiles de GPU o con alto alineado. Si la imagen sale rota: pedir `video_frame0.bin` + lineas `[vp] PRIMER FOTOGRAMA` y deducir el formato.
+- Que el decodificador por hardware escriba en memoria directa (`[vp] textura:`) y si hace falta `vdec=2/3` (parametros de PostInit adivinados).
+- **Rendimiento**: conversion en CPU + presentar 8 MB por fotograma; la presentacion completa (~55-60 ms medidos en 0.5.0) limita a **~15 fps** aunque el video sea de 30. `vhalf=1` ayuda al dibujo pero no a la presentacion; mejora posible: renderizar el video a 1280x720 y escalar con SDL, o rectangulos sucios.
+- Streaming: depende de `Range` en el CDN y de que no exija cookies/UA; las URL con token `secure=...` caducan. HLS (`.m3u8`) no se soporta. WebM/VP9 probablemente no.
+- Si el AvPlayer fuera inviable: `libSceVideodec` + demuxer MP4 propio, o servidor intermedio que transcodifique (camino C de `docs/JS.md`).
+
+## D. Que pedir al usuario tras instalar el PKG
+`log.txt` (lineas `[vp]`, `[video]`, `[quit]`, `[dl]`), `config.txt`, `video_frame0.bin` si hay imagen rota, y el zip `logs` del CI (`quickjs_probe.txt`). Guion en `docs/PRUEBAS.md` («Prueba v0.8.0»).
+```bash
+cd Sackso_PS4_Browser_Testing-main
+git add -A app docs tools third_party .github README.md
+git commit -m "v0.8.0: video integrado (AvPlayer + streaming por rangos), boton Salir, buscador de videos"
+git push
+```
+---
 
 ## 1. Qué es
 Navegador homebrew para **PS4 con GoldHEN**, hecho con el toolchain **OpenOrbis** (LLVM, `x86_64-pc-freebsd12-elf`).
@@ -31,6 +70,7 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 | 0.5.2 | 0.5.1 + reintento con espera ante HTTP 429/503 en imágenes (Wikimedia) y ritmo suave con `wikimedia.org` | **Probada en PS4** (log de 2692 líneas, ver abajo). El 429 no se pudo re-probar: ese log no visitó Wikipedia |
 | 0.6.0 | 0.5.2 + **descargas** (archivos, imágenes y vídeos directos) en primer plano con progreso y cancelación, `about:downloads`, `about:images`, Ctrl+J | **Probada en PS4:** descarga un .mp4 de 17,9 MB completo; un .pkg de 1,31 GB se empezó y se canceló con ○ (cancelación OK). Velocidad no medida (el log no la registraba) |
 | **0.7.0** | 0.6.0 + **menú contextual** (clic derecho), portapapeles interno, atajos, **escritura a disco en hilo aparte** + log de velocidad `[dl]`, **decodificador .ico**, imágenes perezosas (`data-src`…), log del ratón sin spam, **sonda de QuickJS en el CI** | **Sin probar en PS4.** Compila con stubs; `AsyncWriter` e `icodec` pasan pruebas en PC (ASan/UBSan). Es el siguiente PKG a instalar |
+| **0.8.0** | 0.7.0 + **reproductor de video** (libSceAvPlayer, streaming por rangos o archivo descargado), **boton/dialogo Salir**, `about:videos` (F8), ajustes de video | **Sin probar en PS4** ni compilada con el toolchain real en la ultima sesion (solo stubs). Es el siguiente PKG a instalar |
 
 ## 4. Resultados de las pruebas en PS4 real
 ### Prueba v0.5.0 (log de 1092 líneas)
@@ -142,7 +182,7 @@ Objetivo a largo plazo: más compatibilidad, vídeo; plan B/C: portar NetSurf (`
 4. Un banco de pruebas en PC (SDL2 + stubs de `orbis/libkernel.h` y `keyboard.h`) sirve para ejecutar la lógica sin consola; `tools/render_host.cpp` renderiza páginas a PNG.
 
 ## 9. Limitaciones conocidas
-Sin JavaScript (**ni DOM ni CSS**; ver `docs/JS.md`), sin vídeo/audio (las descargas de `.mp4/.webm` directos guardan el archivo pero no se reproducen), sin CSS (salvo color en línea y `display:none`), sin cookies ni Referer, sin caché en disco, imágenes solo PNG/JPEG/BMP (sin WebP, GIF, SVG ni ICO), carga de páginas bloqueante, ~15 fps, charsets no latinos sin soporte, formularios sin multipart, índice de botón 8 del mando sin confirmar (9 sí aparece), 17/18/19 sin identificar. Descargas: solo en primer plano, una a la vez, cancelar solo con ○ del mando.
+Sin JavaScript (**ni DOM ni CSS**; ver `docs/JS.md`), vídeo solo MP4 H.264/AAC con libSceAvPlayer (v0.8.0, experimental, sin probar; sin HLS/WebM), sin CSS (salvo color en línea y `display:none`), sin cookies ni Referer, sin caché en disco, imágenes solo PNG/JPEG/BMP (sin WebP, GIF, SVG ni ICO), carga de páginas bloqueante, ~15 fps, charsets no latinos sin soporte, formularios sin multipart, índice de botón 8 del mando sin confirmar (9 sí aparece), 17/18/19 sin identificar. Descargas: solo en primer plano, una a la vez, cancelar solo con ○ del mando.
 
 ## 10. Git (v0.7.0)
 Archivos nuevos: `app/asyncwriter.h`, `app/asyncwriter.cpp`, `app/icodec.h`, `app/icodec.cpp`, `docs/JS.md`, `tools/tests/test_asyncwriter.cpp`, `tools/tests/test_ico.cpp`, `tools/tests/ico_test.py`. Cambiados: `app/main.cpp`, `app/htmldoc.cpp`, `app/imgworker.cpp`, `app/mouse.cpp`, `app/netclient.cpp`, `app/pagerender.cpp`, `app/pagerender.h`, `.github/workflows/build-pkg.yml` (**el workflow SÍ cambia**: input `probe_js` + paso de sonda), `README.md`, `docs/CONTEXTO.md`, `docs/PRUEBAS.md`, `tools/README.md`.
@@ -155,4 +195,4 @@ git push
 Después: Actions → **Build PKG** → *Run workflow* (deja `probe_js` marcado) → instalar el PKG → probar según `docs/PRUEBAS.md` («Prueba v0.7.0») → devolver `/data/psbrowser/log.txt`, el zip `logs` (con `quickjs_probe.txt`) y `downloads.txt`.
 
 ## 11. Prompt sugerido para una IA nueva
-"Continúa el proyecto psbrowser (navegador homebrew para PS4, OpenOrbis). Lee `docs/CONTEXTO.md` del zip adjunto. v0.6.0 está probada en consola (pestañas, imágenes PNG/JPEG, formularios GET/POST, teclado en pantalla, gzip transparente, descargas). v0.7.0 (menú contextual, portapapeles, atajos, descargas con hilo de disco, ICO, imágenes perezosas, sonda de QuickJS) está sin probar: lo primero es verificarla con mi `log.txt` (líneas `[dl]` con MB/s) y `logs/quickjs_probe.txt`. Después, según el roadmap: **JavaScript** (`docs/JS.md`: árbol DOM → CSS lite → QuickJS), descargas en varias conexiones si el cuello es la red, WebP/SVG/GIF, cookies y el experimento de vídeo con libSceAvPlayer. Responde en español, sé honesto sobre lo no probado o no compilado, pídeme `log.txt` antes de tocar mapeos de entrada, dame los comandos `git` exactos si cambias archivos y entrégame cada vez un `CONTEXTO.md` actualizado."
+"[ESTADO ACTUAL: lee primero la seccion >>> ESTADO v0.8.0 <<< de docs/CONTEXTO.md: el video y el boton Salir ya estan integrados en main.cpp pero sin probar en consola; lo primero es compilar con el CI y probar con mi log] Continúa el proyecto psbrowser (navegador homebrew para PS4, OpenOrbis). Lee `docs/CONTEXTO.md` del zip adjunto. v0.6.0 está probada en consola (pestañas, imágenes PNG/JPEG, formularios GET/POST, teclado en pantalla, gzip transparente, descargas). v0.7.0 (menú contextual, portapapeles, atajos, descargas con hilo de disco, ICO, imágenes perezosas, sonda de QuickJS) está sin probar: lo primero es verificarla con mi `log.txt` (líneas `[dl]` con MB/s) y `logs/quickjs_probe.txt`. Después, según el roadmap: **JavaScript** (`docs/JS.md`: árbol DOM → CSS lite → QuickJS), descargas en varias conexiones si el cuello es la red, WebP/SVG/GIF, cookies y el experimento de vídeo con libSceAvPlayer. Responde en español, sé honesto sobre lo no probado o no compilado, pídeme `log.txt` antes de tocar mapeos de entrada, dame los comandos `git` exactos si cambias archivos y entrégame cada vez un `CONTEXTO.md` actualizado."

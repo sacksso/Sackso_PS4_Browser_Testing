@@ -92,3 +92,12 @@ Instala el PKG y devuelve `/data/psbrowser/log.txt` + el zip `logs` del CI (ahor
 6. **Favicons .ico:** en el log ya no deben salir `no se pudo decodificar (image/x-icon...)`.
 7. **Imagenes perezosas:** en sitios como serviporno.com antes salian `0 imagenes`; ahora se usan `data-src`/`data-original`/`srcset`. Mira la linea `[page] ... N imagenes`.
 8. El log ya no se llena de `sceMouseRead devuelve` (antes ~10 000 lineas).
+
+## Prueba v0.8.0: video integrado y boton de salir (sin probar en PS4)
+Instala el PKG y manda `/data/psbrowser/log.txt` (las lineas `[vp]` son las importantes), `config.txt` y, si la imagen sale rota, `/data/psbrowser/video_frame0.bin`.
+1. **Salir:** boton de apagado de la barra (derecha del todo), Ctrl+Q, `psb:quit` (enlace "Salir" en Inicio/Configuracion) o menu contextual (boton 11 del mando) > "Salir del navegador". Dialogo: X o Intro = salir, O o Esc = cancelar. Anota si la consola vuelve al inicio sin mensaje de error.
+2. **MP4 por streaming:** abre un enlace directo a un `.mp4` (H.264/AAC). Sale la pagina de confirmacion con **[ Reproducir sin descargar ]** (ya seleccionado: X). Mira si aparece imagen y sonido, el texto central ("Almacenando en bufer N%") y el log `[vp]`.
+3. **Descargar y reproducir:** `[ Descargar y reproducir ]`; despues, en `about:downloads` cada video tiene `[ Reproducir ]`.
+4. **Videos de la pagina:** F8 o menu > "Videos de la pagina" (aviso "N videos detectados" al cargar). Prueba en una pagina con `<video>` y en una que guarde el .mp4 dentro de JavaScript.
+5. **Controles:** mando X pausa, O cierra, cruceta izq/der -+10 s, arriba/abajo volumen, botones 4/5 -+30 s, 3 informacion, 2 calidad. Teclado: Espacio/K, flechas, J/L (-+30 s), Inicio, H (calidad), I (informacion), Esc/Q cierran. Raton: clic en la barra = saltar, botones, rueda = volumen.
+6. Si no hay imagen: Configuracion > Decodificador (sistema / software / software 2) y repite; manda `video_frame0.bin` y las lineas `[vp] PRIMER FOTOGRAMA`. Anota los fps de `I` (el dibujo completo a 1920x1080 limita a ~15 fps; `H` = media resolucion ayuda).

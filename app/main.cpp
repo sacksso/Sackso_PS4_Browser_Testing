@@ -25,6 +25,8 @@
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 #include "canvas.h"
@@ -42,6 +44,7 @@
 #include "url.h"
 #include "download.h"
 #include "asyncwriter.h"
+#include "vplayer.h"
 // Lo piden los .h/.cpp de los samples de OpenOrbis (log.h): ellos lo declaran y el programa lo define.
 std::stringstream debugLogStream;
 static FILE* g_log = nullptr;
@@ -67,7 +70,7 @@ static const int TABBAR_H = 40, TOOLBAR_Y = 40, TOOLBAR_H = 48, VIEW_Y = 88, SBA
 static const int VIEW_H = H - VIEW_Y;
 // Codigos de tecla USB HID (los mismos que usa OpenOrbis en orbis/_types/keyboard.h).
 enum {
-    K_A = 4, K_C = 6, K_D = 7, K_J = 13, K_L = 15, K_R = 21, K_T = 23, K_V = 25, K_W = 26, K_X = 27, K_1 = 30, K_9 = 38, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
+    K_A = 4, K_N = 17, K_Y = 28, K_H = 11, K_I = 12, K_K = 14, K_Q = 20, K_F8 = 65, K_C = 6, K_D = 7, K_J = 13, K_L = 15, K_R = 21, K_T = 23, K_V = 25, K_W = 26, K_X = 27, K_1 = 30, K_9 = 38, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
     K_MINUS = 45, K_EQUAL = 46, K_F5 = 62, K_F6 = 63, K_F10 = 67, K_HOME = 74, K_PGUP = 75, K_END = 77, K_PGDOWN = 78,
     K_RIGHT = 79, K_LEFT = 80, K_DOWN = 81, K_UP = 82, K_APP = 101  // K_APP = tecla de menu contextual
 };
@@ -83,6 +86,9 @@ struct Config {
     int pageW = 1200;         // ancho maximo del contenido en px
     bool smooth = true;
     bool images = true;
+    int vdec = 0;             // decodificador de video: 0 sistema (hardware), 2 software, 3 software2
+    bool vhalf = true;        // dibujar el video a media resolucion (mas rapido)
+    int volume = 80;          // volumen por defecto del reproductor (0..100)
 };
 static Config g_cfg;
 static std::vector<std::pair<std::string, std::string>> g_bookmarks;  // (url, titulo)
@@ -93,13 +99,15 @@ static void clampCfg() {
     g_cfg.wheelStep = std::max(1, std::min(10, g_cfg.wheelStep));
     g_cfg.zoom = std::max(80, std::min(200, g_cfg.zoom));
     g_cfg.pageW = std::max(800, std::min(1700, g_cfg.pageW));
+    if (g_cfg.vdec != 2 && g_cfg.vdec != 3) g_cfg.vdec = 0;
+    g_cfg.volume = std::max(0, std::min(100, g_cfg.volume));
 }
 static void configSave() {
     FILE* f = fopen(kCfgPath, "w");
     if (!f) return;
-    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\n",
+    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\n",
             g_cfg.mouseSens, g_cfg.mouseAccel ? 1 : 0, g_cfg.wheelInvert ? 1 : 0, g_cfg.wheelStep, g_cfg.home.c_str(), g_cfg.dark ? 1 : 0,
-            g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0);
+            g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume);
     fclose(f);
 }
 static void configLoad() {
@@ -122,6 +130,9 @@ static void configLoad() {
         else if (k == "pageW") g_cfg.pageW = atoi(v.c_str());
         else if (k == "smooth") g_cfg.smooth = v == "1";
         else if (k == "images") g_cfg.images = v == "1";
+        else if (k == "vdec") g_cfg.vdec = atoi(v.c_str());
+        else if (k == "vhalf") g_cfg.vhalf = v == "1";
+        else if (k == "volume") g_cfg.volume = atoi(v.c_str());
     }
     fclose(f);
     clampCfg();
@@ -228,12 +239,136 @@ static std::string htmlEscape(const std::string& s) {
 }
 static bool isInternal(const std::string& u) { return u.compare(0, 6, "about:") == 0; }
 static std::string homeUrl() { return g_cfg.home.empty() ? "about:home" : g_cfg.home; }
+
+// ------------------------------------------------------------------ video: utilidades, buscador de videos de la pagina, salir
+static std::string lowerStr(const std::string& s) {
+    std::string a = s;
+    for (auto& c : a) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return a;
+}
+static std::string urlPathLower(const std::string& url) { return lowerStr(url.substr(0, url.find_first_of("?#"))); }
+static bool endsWithStr(const std::string& s, const char* suf) {
+    const size_t n = std::strlen(suf);
+    return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+}
+// URL cuyo camino acaba en una extension de video (MP4/M4V/MOV son lo que decodifica AvPlayer; el resto es dudoso).
+static bool looksVideoUrl(const std::string& url) {
+    const std::string p = urlPathLower(url);
+    return endsWithStr(p, ".mp4") || endsWithStr(p, ".m4v") || endsWithStr(p, ".mov") || endsWithStr(p, ".webm") || endsWithStr(p, ".mkv") || endsWithStr(p, ".m3u8");
+}
+static bool isVideoFileName(const std::string& name) {
+    const std::string p = lowerStr(name);
+    return endsWithStr(p, ".mp4") || endsWithStr(p, ".m4v") || endsWithStr(p, ".mov") || endsWithStr(p, ".webm") || endsWithStr(p, ".mkv");
+}
+static std::string videoNote(const std::string& urlOrName) {
+    const std::string p = urlPathLower(urlOrName);
+    if (endsWithStr(p, ".m3u8")) return "HLS (por segmentos): probablemente no se pueda reproducir";
+    if (endsWithStr(p, ".webm") || endsWithStr(p, ".mkv")) return "formato WebM/MKV: es probable que el reproductor de la PS4 no lo decodifique";
+    return std::string();
+}
+static std::string titleFromUrl(const std::string& url) {
+    const std::string path = url.substr(0, url.find_first_of("?#"));
+    const size_t sl = path.rfind('/');
+    std::string n = sl == std::string::npos ? path : path.substr(sl + 1);
+    return n.empty() ? url : n;
+}
+struct VidItem { std::string url, note; };
+static std::vector<VidItem> g_lastVids;   // videos encontrados en el HTML de la ultima pagina web
+static std::string g_lastVidsPage;
+static std::string g_navReferer;          // pagina desde la que se navego (Referer para videos/descargas)
+static std::string g_pendRef;             // Referer de la pagina de confirmacion de descarga actual
+static bool g_quitAsk = false, g_quit = false;
+static void quitAsk() { g_quitAsk = true; g_dirty = true; }
+// --- reproductor de video a pantalla completa y dialogo de salida: estado compartido
+static bool g_vpMode = false;          // hay un video abierto y la interfaz de video ocupa toda la pantalla
+static uint32_t g_vpLastAct = 0;       // ultima actividad del usuario (el overlay se oculta a los 3 s)
+static bool g_vpStats = false;         // panel de estadisticas (boton 3 / tecla I)
+struct VpBtn { int x, y, w, h, id; };
+static std::vector<VpBtn> g_vpBtns;    // botones del overlay (del ultimo fotograma dibujado)
+static int g_vpBar[4] = {0, 0, 0, 0};  // zona clicable de la barra de progreso: x, y, w, h
+static int g_quitBtn[2][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}};  // [Salir] y [Cancelar]: x, y, w, h
+// Abre un video (URL http(s) o ruta de archivo). El reproductor abre en un hilo: no bloquea.
+static void playVideo(const std::string& src, const std::string& title, const std::string& referer) {
+    if (vp_active()) vp_close();
+    vp_set_decoder(g_cfg.vdec);
+    vp_set_volume_default(g_cfg.volume);
+    imgw_cancel();
+    imgw_pause(true);  // las imagenes no deben competir por la red con el video
+    psb_log("[video] reproducir '%s' (%s) referer='%s'", title.c_str(), src.c_str(), referer.c_str());
+    if (!vp_open(src, title, referer)) {
+        toast("No se pudo iniciar el reproductor", true);
+        imgw_pause(false);
+        return;
+    }
+    g_vpMode = true;
+    g_vpStats = false;
+    g_vpLastAct = SDL_GetTicks();
+    g_dirty = true;
+}
+static void closeVideo() {
+    if (vp_active()) vp_close();
+    g_vpMode = false;
+    imgw_pause(false);
+    g_dirty = true;
+}
+
+// Busca a mano URLs de video en el HTML CRUDO (muchos sitios las dejan dentro de JavaScript/JSON, no en <video>).
+static void scanVideos(const std::string& html, const std::string& base, std::vector<VidItem>& out) {
+    out.clear();
+    const std::string low = lowerStr(html);
+    static const char* exts[] = {".mp4", ".m3u8", ".webm", ".mov", ".m4v"};
+    std::map<std::string, bool> seen;
+    auto isDelim = [](char c) { return c == '"' || c == '\'' || c == '(' || c == ')' || c == '<' || c == '>' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ',' || c == ';'; };
+    for (const char* ext : exts) {
+        const size_t en = std::strlen(ext);
+        size_t pos = 0;
+        while ((pos = low.find(ext, pos)) != std::string::npos && out.size() < 60) {
+            const size_t p = pos;
+            pos += en;
+            if (p + en < low.size()) {
+                const char nc = low[p + en];
+                if (std::isalnum(static_cast<unsigned char>(nc)) || nc == '_') continue;  // p. ej. ".mp4a"
+            }
+            // ';' separa, salvo que sea el final de "&amp;" (muy comun en URLs dentro de HTML)
+            auto isDelimAt = [&](size_t i) { return html[i] == ';' && i >= 4 && html.compare(i - 4, 4, "&amp") == 0 ? false : isDelim(html[i]); };
+            size_t st = p;
+            while (st > 0 && !isDelimAt(st - 1) && p - st < 1400) st--;
+            size_t ed = p + en;
+            while (ed < html.size() && !isDelimAt(ed) && ed - p < 1400) ed++;
+            std::string cand = html.substr(st, ed - st);
+            if (cand.size() < 5) continue;
+            const bool quoted = st > 0 && ed < html.size() && (html[st - 1] == '"' || html[st - 1] == '\'') && html[ed] == html[st - 1];
+            // des-escapar JSON/HTML
+            std::string c2;
+            for (size_t i = 0; i < cand.size(); i++) {
+                if (cand.compare(i, 2, "\\/") == 0) { c2 += '/'; i++; }
+                else if (cand.compare(i, 6, "\\u0026") == 0) { c2 += '&'; i += 5; }
+                else if (cand.compare(i, 6, "\\u002F") == 0 || cand.compare(i, 6, "\\u002f") == 0) { c2 += '/'; i += 5; }
+                else if (cand.compare(i, 5, "&amp;") == 0) { c2 += '&'; i += 4; }
+                else c2 += cand[i];
+            }
+            if (c2.find('/') == std::string::npos && !quoted) continue;  // "video.mp4" suelto en un texto no es una direccion
+            const std::string full = urlResolve(base, c2);
+            if (!urlIsHttp(full) || seen.count(full)) continue;
+            seen[full] = true;
+            out.push_back({full, videoNote(full)});
+        }
+    }
+}
+static void captureVideos(const std::string& html, const std::string& base) {
+    std::vector<VidItem> v;
+    scanVideos(html, base, v);
+    if (v.empty()) return;
+    g_lastVids.swap(v);
+    g_lastVidsPage = base;
+    toast(std::to_string(g_lastVids.size()) + (g_lastVids.size() == 1 ? " video detectado (F8)" : " videos detectados (F8)"));
+}
 static std::string genHome() {
     std::string h =
         "<html><head><title>Inicio</title></head><body><h1>psbrowser</h1>"
         "<form action=\"https://html.duckduckgo.com/html/\" method=\"get\">"
         "<input type=\"text\" name=\"q\" placeholder=\"Buscar con DuckDuckGo\"> <input type=\"submit\" value=\"Buscar\"></form>"
-        "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:images\">Imagenes de la ultima pagina</a></p>"
+        "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:images\">Imagenes de la ultima pagina</a> | <a href=\"about:videos\">Videos de la pagina</a> | <a href=\"psb:quit\">Salir</a></p>"
         "<h2>Marcadores</h2>";
     if (g_bookmarks.empty()) h += "<p>Aun no hay marcadores: pulsa la estrella de la barra (o Ctrl+D) en una pagina.</p>";
     else {
@@ -253,11 +388,12 @@ static std::string genHome() {
          "<li>Teclado: Ctrl+T nueva pestana, Ctrl+W cerrar, F6 o Ctrl+L direccion, Tab/Enter enlaces y campos, Backspace atras, F5 recargar, F10 configuracion, Ctrl+D marcador, Ctrl +/- zoom, Ctrl+C copiar enlace o direccion, Ctrl+V pegar, Ctrl+Mayus+T reabrir pestana, tecla Menu = menu contextual.</li>"
          "<li>Raton: clic en enlaces, botones y pestanas; clic central o Ctrl+clic abre en pestana nueva; Alt+clic descarga; clic derecho = menu contextual (copiar enlace o imagen, guardar, atras...); rueda = desplazar.</li>"
          "<li>Mando: cruceta = foco / atras / adelante; boton 0 activar, 1 atras, 2 recargar, 3 inicio, 4/5 pagina; boton 11 menu contextual; stick = desplazar.</li>"
-         "</ul><p>Sin JavaScript, sin video/audio y con CSS limitado. Los formularios POST se envian de verdad; no hay cookies ni JavaScript.</p></body></html>";
+         "</ul><p>Sin JavaScript y con CSS limitado. Los formularios POST se envian de verdad; no hay cookies. Video: MP4 (H.264/AAC) con el reproductor de la consola (experimental): abre un enlace a un .mp4 y elige Reproducir; F8 = videos de la pagina; Ctrl+Q = salir.</p></body></html>";
     return h;
 }
 static std::string genSettings() {
-    char b[4200];
+    char b[6200];
+    const char* vd = g_cfg.vdec == 2 ? "software" : (g_cfg.vdec == 3 ? "software 2" : "sistema (hardware)");
     snprintf(b, sizeof(b),
              "<html><head><title>Configuracion</title></head><body><h1>Configuracion</h1>"
              "<h2>Aspecto</h2>"
@@ -274,11 +410,16 @@ static std::string genSettings() {
              "<h2>Pagina de inicio</h2>"
              "<p>Actual: %s</p>"
              "<p><a href=\"psb:homehere\">[ usar la pagina anterior como inicio ]</a> <a href=\"psb:homereset\">[ restablecer ]</a></p>"
-             "<h2>Otros</h2><p><a href=\"about:bookmarks\">Marcadores</a> | <a href=\"about:home\">Inicio</a></p>"
+             "<h2>Video</h2>"
+             "<p>Decodificador: <a href=\"psb:vdec\">[ %s ]</a> (si el video no muestra imagen, prueba otro)</p>"
+             "<p>Dibujar a media resolucion (mas rapido): <a href=\"psb:vhalf\">[ %s ]</a></p>"
+             "<p>Volumen inicial: <a href=\"psb:vol-\">[ - ]</a> %d%% <a href=\"psb:vol+\">[ + ]</a></p>"
+             "<h2>Otros</h2><p><a href=\"about:bookmarks\">Marcadores</a> | <a href=\"about:home\">Inicio</a> | <a href=\"about:videos\">Videos de la pagina</a></p>"
+             "<p><a href=\"psb:quit\">[ Salir del navegador ]</a></p>"
              "<p>Los cambios se guardan al momento en /data/psbrowser/config.txt. Mueve el raton para probar la sensibilidad.</p>"
              "</body></html>",
              g_cfg.dark ? "oscuro" : "claro", g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? "si" : "no", g_cfg.images ? "si" : "no", g_cfg.mouseSens,
-             g_cfg.mouseAccel ? "si" : "no", g_cfg.wheelInvert ? "si" : "no", g_cfg.wheelStep, htmlEscape(homeUrl()).c_str());
+             g_cfg.mouseAccel ? "si" : "no", g_cfg.wheelInvert ? "si" : "no", g_cfg.wheelStep, htmlEscape(homeUrl()).c_str(), vd, g_cfg.vhalf ? "si" : "no", g_cfg.volume);
     return b;
 }
 static std::string genBookmarks() {
@@ -351,8 +492,9 @@ static std::string genDownloads() {
     } else {
         h += "<ul>";
         for (size_t i = g_dls.size(); i-- > 0;)  // la mas reciente arriba
-            h += "<li><b>" + htmlEscape(g_dls[i].name) + "</b> - " + dl_format_size(g_dls[i].bytes) + " <a href=\"psb:deldl:" + std::to_string(i) +
-                 "\">[ borrar ]</a><br>" + htmlEscape(g_dls[i].url) + "</li>";
+            h += "<li><b>" + htmlEscape(g_dls[i].name) + "</b> - " + dl_format_size(g_dls[i].bytes) +
+                 (isVideoFileName(g_dls[i].name) ? " <a href=\"psb:playfile:" + std::to_string(i) + "\">[ Reproducir ]</a>" : std::string()) +
+                 " <a href=\"psb:deldl:" + std::to_string(i) + "\">[ borrar ]</a><br>" + htmlEscape(g_dls[i].url) + "</li>";
         h += "</ul>";
     }
     h += "<p><a href=\"about:images\">Imagenes de la ultima pagina</a> | <a href=\"about:home\">Inicio</a> | <a href=\"about:settings\">Configuracion</a></p></body></html>";
@@ -380,7 +522,28 @@ static std::string genImages() {
     h += "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:home\">Inicio</a></p></body></html>";
     return h;
 }
+static std::string genVideos() {
+    std::string h = "<html><head><title>Videos de la pagina</title></head><body><h1>Videos de la ultima pagina</h1>";
+    if (g_lastVids.empty()) {
+        h += "<p>No se detectaron videos: abre una pagina con videos y vuelve aqui (F8). Se buscan direcciones .mp4, .m3u8 y .webm en el codigo de la pagina, "
+             "incluso las que estan dentro de JavaScript.</p>";
+    } else {
+        h += "<p>" + htmlEscape(g_lastVidsPage) + "</p><p>Reproducir ve el video sin descargarlo (solo MP4 con H.264/AAC es seguro); Descargar lo guarda.</p><ul>";
+        for (size_t i = 0; i < g_lastVids.size(); i++) {
+            std::string label = g_lastVids[i].url;
+            if (label.size() > 110) label = label.substr(0, 107) + "...";
+            h += "<li>" + htmlEscape(label) + "<br><a href=\"psb:play:" + htmlEscape(g_lastVids[i].url) + "\">[ Reproducir ]</a> <a href=\"psb:dlgo:" +
+                 htmlEscape(g_lastVids[i].url) + "\">[ Descargar ]</a>";
+            if (!g_lastVids[i].note.empty()) h += " - " + htmlEscape(g_lastVids[i].note);
+            h += "</li>";
+        }
+        h += "</ul>";
+    }
+    h += "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:images\">Imagenes de la pagina</a> | <a href=\"about:home\">Inicio</a></p></body></html>";
+    return h;
+}
 static std::string genInternal(const std::string& url) {
+    if (url == "about:videos") return genVideos();
     if (url == "about:settings") return genSettings();
     if (url == "about:bookmarks") return genBookmarks();
     if (url == "about:downloads") return genDownloads();
@@ -435,7 +598,7 @@ static void setPage(Browser& b, const std::string& url, std::string html, int ki
     b.html = std::move(html);
     b.kind = kind;
     layoutDoc(b);
-    if (kind == 0 && !g_skipCapture && !isInternal(url)) captureImages(b);
+    if (kind == 0 && !g_skipCapture && !isInternal(url)) { captureImages(b); captureVideos(b.html, url); }
     b.scrollY = 0;
     b.scrollTarget = 0;
     g_dirty = true;
@@ -738,11 +901,20 @@ static void showDownloadPrompt(Browser& b, const HttpResult& r) {
         setPage(b, url, infoHtml("Video por segmentos (streaming)", "Esta lista reparte el video en muchos trozos y no se puede guardar como un solo archivo.", url), 0);
         return;
     }
+    g_pendRef = g_navReferer;
     g_pend.url = url;
     g_pend.name = dl_filename(url, r.contentDisposition, r.contentType);
     g_pend.type = r.contentType.empty() ? std::string("application/octet-stream") : r.contentType;
     g_pend.len = r.contentLength;
     std::string h = "<html><head><title>Descargar " + htmlEscape(g_pend.name) + "</title></head><body><h1>Descargar archivo</h1>";
+    const bool isVid = r.contentType.compare(0, 6, "video/") == 0 || (looksVideoUrl(url) && urlPathLower(url).find(".m3u8") == std::string::npos);
+    if (isVid) {  // video directo: primero [Reproducir] (queda seleccionado) y luego las opciones de descarga
+        h += "<p><a href=\"psb:play:" + htmlEscape(url) + "\">[ Reproducir sin descargar ]</a> <a href=\"psb:dlplay:" + htmlEscape(url) +
+             "\">[ Descargar y reproducir ]</a></p>";
+        std::string note = videoNote(url);
+        if (note.empty() && (containsCI(r.contentType, "webm") || containsCI(r.contentType, "matroska"))) note = "formato WebM/MKV: es probable que el reproductor de la PS4 no lo decodifique";
+        h += "<p>El reproductor de la consola decodifica MP4 (H.264/AAC). Es experimental" + (note.empty() ? std::string() : "; " + note) + ".</p>";
+    }
     if (dl_is_previewable_image(r.contentType)) h += "<p><img src=\"" + htmlEscape(url) + "\" width=\"640\" height=\"420\"></p>";
     h += "<p>Nombre: <b>" + htmlEscape(g_pend.name) + "</b></p><p>Tipo: " + htmlEscape(dl_type_label(r.contentType)) + "</p><p>Tamano: " +
          (r.contentLength >= 0 ? dl_format_size(r.contentLength) : std::string("desconocido")) + "</p><p>Se guardara en " + kDlDir + "/</p>" +
@@ -751,7 +923,7 @@ static void showDownloadPrompt(Browser& b, const HttpResult& r) {
     g_skipCapture = true;
     setPage(b, url, h, 0);
     g_skipCapture = false;
-    if (!b.doc.focus.empty()) b.sel = 0;  // [Descargar] ya queda seleccionado: X lo activa
+    if (!b.doc.focus.empty()) b.sel = 0;  // el primer boton ([Reproducir] o [Descargar]) ya queda seleccionado: X lo activa
 }
 // Cuerpo POST pendiente: lo deja submitForm y lo consume load() una sola vez (recargar o volver usan GET).
 static HttpPost g_post;
@@ -773,6 +945,7 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
         setPage(b, url, infoHtml("Video por segmentos (streaming)", "Esta lista reparte el video en muchos trozos y no se puede guardar como un solo archivo. Los .mp4 y .webm directos si se pueden descargar.", url), 0);
         return;
     }
+    if (urlIsHttp(b.url) && b.url != url) g_navReferer = b.url;  // pagina desde la que se llega (Referer de videos/descargas)
     g_loading = true;
     imgw_cancel();      // las imagenes pendientes de la pagina anterior ya no importan
     imgw_pause(true);   // y el hilo de imagenes no debe quitarle la red a la navegacion
@@ -901,6 +1074,26 @@ static void toggleBookmark(Browser& b) {
     g_dirty = true;
 }
 // Acciones internas (enlaces psb:...). Devuelve true si la accion se reconocio.
+// Descarga en primer plano; con thenPlay, al terminar abre el video descargado en el reproductor.
+static bool startDownload(Browser& b, const std::string& url, bool thenPlay) {
+    if (g_pend.url != url) { g_pend = DlPending(); g_pend.url = url; }
+    std::string err;
+    if (runDownload(url, err)) {
+        const std::string saved = g_dls.empty() ? std::string() : g_dls.back().name;
+        navigate(b, "about:downloads", true);
+        if (thenPlay && !saved.empty()) playVideo(std::string(kDlDir) + "/" + saved, saved, std::string());
+        return true;
+    }
+    std::string h = "<html><head><title>Descarga fallida</title></head><body><h1>Descarga fallida</h1><p>" + htmlEscape(err) + "</p><p>" +
+                    htmlEscape(url) + "</p><p><a href=\"psb:" + (thenPlay ? "dlplay:" : "dlgo:") + htmlEscape(url) +
+                    "\">[ Reintentar ]</a> <a href=\"psb:dlback\">[ Volver ]</a></p></body></html>";
+    g_skipCapture = true;
+    setPage(b, b.url, h, 0);
+    g_skipCapture = false;
+    if (!b.doc.focus.empty()) b.sel = 0;
+    toast(err.size() > 90 ? err.substr(0, 90) : err, true);
+    return true;
+}
 static bool handleAction(Browser& b, const std::string& a) {
     bool cfg = true, relay = false;
     if (a == "sens-1") g_cfg.mouseSens -= 1.0f;
@@ -922,20 +1115,24 @@ static bool handleAction(Browser& b, const std::string& a) {
         const int prev = b.histPos - 1;
         if (prev >= 0) g_cfg.home = b.hist[prev].req; else g_cfg.home.clear();
     } else if (a == "homereset") g_cfg.home.clear();
-    else if (a.compare(0, 5, "dlgo:") == 0) {  // psb:dlgo:<url> = descargar (lo crea showDownloadPrompt)
+    else if (a == "quit") { quitAsk(); return true; }
+    else if (a == "vdec") g_cfg.vdec = g_cfg.vdec == 0 ? 2 : (g_cfg.vdec == 2 ? 3 : 0);
+    else if (a == "vhalf") g_cfg.vhalf = !g_cfg.vhalf;
+    else if (a == "vol-") g_cfg.volume -= 10;
+    else if (a == "vol+") g_cfg.volume += 10;
+    else if (a.compare(0, 5, "play:") == 0) {  // psb:play:<url> = ver sin descargar (streaming por rangos)
         const std::string url = a.substr(5);
-        if (g_pend.url != url) { g_pend = DlPending(); g_pend.url = url; }
-        std::string err;
-        if (runDownload(url, err)) { navigate(b, "about:downloads", true); return true; }
-        std::string h = "<html><head><title>Descarga fallida</title></head><body><h1>Descarga fallida</h1><p>" + htmlEscape(err) + "</p><p>" +
-                        htmlEscape(url) + "</p><p><a href=\"psb:dlgo:" + htmlEscape(url) + "\">[ Reintentar ]</a> <a href=\"psb:dlback\">[ Volver ]</a></p></body></html>";
-        g_skipCapture = true;
-        setPage(b, b.url, h, 0);
-        g_skipCapture = false;
-        if (!b.doc.focus.empty()) b.sel = 0;
-        toast(err.size() > 90 ? err.substr(0, 90) : err, true);
+        const std::string ref = g_pend.url == url ? g_pendRef : (isInternal(b.url) ? g_lastVidsPage : b.url);
+        playVideo(url, titleFromUrl(url), urlIsHttp(ref) ? ref : std::string());
         return true;
-    } else if (a == "dlback") {
+    } else if (a.compare(0, 9, "playfile:") == 0) {  // psb:playfile:N = reproducir una descarga
+        const size_t i = static_cast<size_t>(atoi(a.c_str() + 9));
+        if (i < g_dls.size()) playVideo(std::string(kDlDir) + "/" + g_dls[i].name, g_dls[i].name, std::string());
+        return true;
+    }
+    else if (a.compare(0, 5, "dlgo:") == 0) return startDownload(b, a.substr(5), false);  // psb:dlgo:<url> = descargar (lo crea showDownloadPrompt)
+    else if (a.compare(0, 7, "dlplay:") == 0) return startDownload(b, a.substr(7), true);   // descargar y reproducir
+    else if (a == "dlback") {
         if (b.histPos > 0) goBack(b); else navigate(b, homeUrl(), true);
         return true;
     } else if (a.compare(0, 6, "deldl:") == 0) {
@@ -1066,7 +1263,7 @@ static int nextTextField(const Browser& b, int from) {
     return -1;
 }
 // ------------------------------------------------------------------ interfaz: pestanas, barra, omnibox
-enum UiKind { UI_TAB = 1, UI_TABCLOSE, UI_NEWTAB, UI_BACK, UI_FWD, UI_RELOAD, UI_HOME, UI_OMNI, UI_STAR, UI_BMARKS, UI_MENU, UI_SBAR };
+enum UiKind { UI_TAB = 1, UI_TABCLOSE, UI_NEWTAB, UI_BACK, UI_FWD, UI_RELOAD, UI_HOME, UI_OMNI, UI_STAR, UI_BMARKS, UI_MENU, UI_SBAR, UI_POWER };
 struct UiRect { int x, y, w, h, kind, arg; };
 static std::vector<UiRect> g_ui;
 static int g_hoverKey = -1;
@@ -1090,6 +1287,7 @@ static const char* uiTip(int kind) {
         case UI_STAR: return "Anadir o quitar marcador (Ctrl+D)";
         case UI_BMARKS: return "Marcadores";
         case UI_MENU: return "Configuracion (F10)";
+        case UI_POWER: return "Salir del navegador (Ctrl+Q)";
         case UI_NEWTAB: return "Pestana nueva (Ctrl+T)";
         default: return "";
     }
@@ -1171,7 +1369,7 @@ static RenderCtx makeRc(Browser& b) {
 enum CtxAct {
     CA_SEP = 0, CA_OPEN_LINK, CA_OPEN_LINK_TAB, CA_COPY_LINK, CA_DL_LINK, CA_OPEN_IMG, CA_OPEN_IMG_TAB, CA_COPY_IMG, CA_DL_IMG,
     CA_BACK, CA_FWD, CA_RELOAD, CA_COPY_URL, CA_BOOKMARK, CA_PASTE_GO, CA_EDIT_URL, CA_NEW_TAB, CA_CLOSE_TAB, CA_DUP_TAB,
-    CA_CLOSE_OTHERS, CA_REOPEN_TAB, CA_DOWNLOADS, CA_HOME, CA_BOOKMARKS
+    CA_CLOSE_OTHERS, CA_REOPEN_TAB, CA_DOWNLOADS, CA_HOME, CA_BOOKMARKS, CA_VIDEOS, CA_PLAY_LINK, CA_QUIT
 };
 struct CtxItem { std::string label; int act; std::string arg; int tab; bool enabled; };
 struct CtxMenu {
@@ -1261,6 +1459,7 @@ static void ctxOpen(int x, int y, int forceFocus = -1) {
             ctxAdd("Abrir enlace", CA_OPEN_LINK, linkUrl);
             ctxAdd("Abrir en pestana nueva", CA_OPEN_LINK_TAB, linkUrl);
             ctxAdd("Copiar direccion del enlace", CA_COPY_LINK, linkUrl);
+            if (urlIsHttp(linkUrl) && looksVideoUrl(linkUrl)) ctxAdd("Reproducir video", CA_PLAY_LINK, linkUrl);
             if (urlIsHttp(linkUrl)) ctxAdd("Descargar enlace", CA_DL_LINK, linkUrl);
             ctxSep();
         }
@@ -1283,7 +1482,10 @@ static void ctxOpen(int x, int y, int forceFocus = -1) {
         ctxAdd("Reabrir pestana cerrada", CA_REOPEN_TAB, "", !g_closedTabs.empty());
         ctxAdd("Marcadores", CA_BOOKMARKS);
         ctxAdd("Descargas", CA_DOWNLOADS);
+        ctxAdd("Videos de la pagina (F8)", CA_VIDEOS, "", !g_lastVids.empty());
         ctxAdd("Inicio", CA_HOME);
+        ctxSep();
+        ctxAdd("Salir del navegador", CA_QUIT);
     }
     g_ctx.open = true;
     ctxLayout();
@@ -1335,6 +1537,9 @@ static void ctxRun(int i) {
         case CA_DOWNLOADS: navigate(b, "about:downloads", true); break;
         case CA_BOOKMARKS: navigate(b, "about:bookmarks", true); break;
         case CA_HOME: navigate(b, homeUrl(), true); break;
+        case CA_VIDEOS: navigate(b, "about:videos", true); break;
+        case CA_PLAY_LINK: handleAction(b, "play:" + it.arg); break;
+        case CA_QUIT: quitAsk(); break;
         default: break;
     }
 }
@@ -1420,7 +1625,17 @@ static void drawToolbar(Canvas& cv, Browser& b) {
         addUi(static_cast<int>(cx) - 20, TOOLBAR_Y + 4, 40, 40, kind, 0);
     }
     // botones de la derecha: marcadores y menu
-    const float cxMenu = static_cast<float>(W - 36), cxBm = static_cast<float>(W - 82);
+    const float cxPow = static_cast<float>(W - 36), cxMenu = static_cast<float>(W - 82), cxBm = static_cast<float>(W - 128);
+    {  // boton de apagado (salir)
+        const bool hp = g_hoverKey == UI_POWER * 1000;
+        const uint32_t bgc = hp ? th.tabHover : th.toolbar;
+        if (hp) cv.circle(cxPow, cyb, 19, th.tabHover);
+        cv.circle(cxPow, cyb + 1, 9.5f, th.ink);
+        cv.circle(cxPow, cyb + 1, 7.4f, bgc);
+        cv.rect(static_cast<int>(cxPow) - 6, static_cast<int>(cyb) - 12, 12, 10, bgc);
+        cv.line(cxPow, cyb - 11, cxPow, cyb, 2.4f, th.ink);
+        addUi(static_cast<int>(cxPow) - 20, TOOLBAR_Y + 4, 40, 40, UI_POWER, 0);
+    }
     if (g_hoverKey == UI_MENU * 1000) cv.circle(cxMenu, cyb, 19, th.tabHover);
     for (int i = -1; i <= 1; i++) cv.rect(static_cast<int>(cxMenu) - 8, static_cast<int>(cyb) + i * 6 - 1, 16, 2, th.ink);
     addUi(static_cast<int>(cxMenu) - 20, TOOLBAR_Y + 4, 40, 40, UI_MENU, 0);
@@ -1429,7 +1644,7 @@ static void drawToolbar(Canvas& cv, Browser& b) {
     cv.line(cxBm + 6, cyb + 9, cxBm, cyb + 4, 2.0f, th.ink); cv.line(cxBm, cyb + 4, cxBm - 6, cyb + 9, 2.0f, th.ink); cv.line(cxBm - 6, cyb + 9, cxBm - 6, cyb - 9, 2.0f, th.ink);
     addUi(static_cast<int>(cxBm) - 20, TOOLBAR_Y + 4, 40, 40, UI_BMARKS, 0);
     // omnibox
-    const int ox = 14 + 4 * 44 + 12, ow = W - 120 - ox, oy = TOOLBAR_Y + 6, oh = 36;
+    const int ox = 14 + 4 * 44 + 12, ow = W - 166 - ox, oy = TOOLBAR_Y + 6, oh = 36;
     if (b.urlEdit) cv.rrectBorder(ox, oy, ow, oh, 18, 2, th.accent, th.omni);
     else cv.rrectBorder(ox, oy, ow, oh, 18, 1, th.omniBorder, th.omni);
     addUi(ox, oy, ow, oh, UI_OMNI, 0);
@@ -1523,8 +1738,201 @@ static void drawDownload(Canvas& cv) {
     te_draw(cv, px, py + ph + 40, te_fit(st, pw, FONT_SANS, 18, false), FONT_SANS, 18, false, th.text);
     te_draw(cv, px, by + bh - 26, "Cancelar: boton O (circulo) del mando", FONT_SANS, 16, false, th.dim);
 }
+// ------------------------------------------------------------------ reproductor de video: interfaz y entradas
+static bool vpOverlayVisible(uint32_t now, const VpInfo& vi) {
+    if (vi.state != VP_PLAYING) return true;  // abriendo, en pausa, almacenando, fin o error: siempre visible
+    return g_vpStats || now - g_vpLastAct < 3000;
+}
+static void vpVolToast() { toast("Volumen " + std::to_string(vp_info().volume) + "%"); }
+static void drawVideoUi(Canvas& cv) {
+    const Theme& th = g_th;
+    const VpInfo vi = vp_info();
+    const uint32_t now = SDL_GetTicks();
+    cv.resetClip();
+    cv.rect(0, 0, W, H, 0xFF000000);
+    if (vi.frames > 0 && vi.vw > 0 && vi.vh > 0) {  // fotograma con la proporcion original (bandas negras)
+        int vw = W, vh = H;
+        if (static_cast<int64_t>(W) * vi.vh > static_cast<int64_t>(H) * vi.vw) vw = static_cast<int>(static_cast<int64_t>(H) * vi.vw / vi.vh);
+        else vh = static_cast<int>(static_cast<int64_t>(W) * vi.vh / vi.vw);
+        vp_draw_video(cv, (W - vw) / 2, (H - vh) / 2, vw, vh, g_cfg.vhalf);
+    }
+    g_vpBtns.clear();
+    g_vpBar[0] = g_vpBar[1] = g_vpBar[2] = g_vpBar[3] = 0;
+    // texto de estado en el centro
+    std::string msg;
+    bool bad = false;
+    if (vi.state == VP_ERROR) { msg = vi.error.empty() ? std::string("Error de reproduccion") : vi.error; bad = true; }
+    else if (vi.state == VP_OPENING) msg = vi.stage.empty() ? std::string("Abriendo video...") : vi.stage;
+    else if (vi.netWait || vi.state == VP_BUFFERING) msg = "Almacenando en bufer " + std::to_string(vi.bufPct) + "%";
+    else if (vi.state == VP_ENDED) msg = "Fin del video";
+    else if (vi.noFrameSecs >= 8) msg = "Sin imagen: el decodificador no entrega fotogramas. Prueba otro decodificador en Configuracion.";
+    else if (vi.frames == 0 && vi.state == VP_PLAYING) msg = vi.stage.empty() ? std::string("Preparando imagen...") : vi.stage;
+    if (!msg.empty()) {
+        const std::string t = te_fit(msg, W - 240, FONT_SANS, 26, false);
+        const int tw = te_width(t, FONT_SANS, 26, false);
+        cv.rrect((W - tw) / 2 - 28, H / 2 - 36, tw + 56, 72, 12, 0xCC000000);
+        te_draw(cv, (W - tw) / 2, baseFor(H / 2 - 36, 72, FONT_SANS, 26), t, FONT_SANS, 26, false, bad ? th.bad : 0xFFFFFFFF);
+    }
+    if (vpOverlayVisible(now, vi)) {
+        cv.rect(0, 0, W, 72, 0xB0000000);  // titulo
+        te_draw(cv, 40, baseFor(0, 72, FONT_SANS, 24), te_fit(vi.title, W - 640, FONT_SANS, 24, true), FONT_SANS, 24, true, 0xFFFFFFFF);
+        const std::string hint = "Esc cierra   H calidad   I informacion";
+        te_draw(cv, W - 40 - te_width(hint, FONT_SANS, 18, false), baseFor(0, 72, FONT_SANS, 18), hint, FONT_SANS, 18, false, 0xFFCCCCCC);
+        const int barTop = H - 176;
+        cv.rect(0, barTop, W, 176, 0xB0000000);  // barra inferior
+        const int bx = 60, bw = W - 120, by = barTop + 26, bh = 8;
+        cv.rrect(bx, by, bw, bh, 4, 0x55FFFFFF);
+        const float fr = vi.durMs > 0 ? std::min(1.0f, static_cast<float>(vi.posMs) / static_cast<float>(vi.durMs)) : 0.0f;
+        const int fw = static_cast<int>(bw * fr);
+        if (fw > 0) cv.rrect(bx, by, std::max(8, fw), bh, 4, th.accent);
+        cv.circle(static_cast<float>(bx + fw), by + bh / 2.0f, 10.0f, 0xFFFFFFFF);
+        g_vpBar[0] = bx - 12; g_vpBar[1] = by - 16; g_vpBar[2] = bw + 24; g_vpBar[3] = bh + 32;
+        const std::string tm = fmtTime(static_cast<long long>(vi.posMs / 1000)) + " / " + (vi.durMs > 0 ? fmtTime(static_cast<long long>(vi.durMs / 1000)) : std::string("--:--"));
+        te_draw(cv, bx, by + 50, tm, FONT_SANS, 20, false, 0xFFFFFFFF);
+        const std::string vol = "Volumen " + std::to_string(vi.volume) + "%";
+        te_draw(cv, W - 60 - te_width(vol, FONT_SANS, 20, false), by + 50, vol, FONT_SANS, 20, false, 0xFFFFFFFF);
+        const char* labels[6] = {"-10 s", vi.state == VP_PAUSED ? "Seguir" : "Pausa", "+10 s", "Vol -", "Vol +", "Cerrar"};
+        const int bwid = 132, bhei = 52, gap = 14, total = 6 * bwid + 5 * gap;
+        int x = (W - total) / 2;
+        const int y = barTop + 100;
+        for (int i = 0; i < 6; i++) {
+            const bool hov = g_mouseOk && g_mx >= x && g_mx < x + bwid && g_my >= y && g_my < y + bhei;
+            cv.rrectBorder(x, y, bwid, bhei, 10, 1, 0x66FFFFFF, hov ? th.accent : 0xCC2B2C2F);
+            const int tw = te_width(labels[i], FONT_SANS, 22, false);
+            te_draw(cv, x + (bwid - tw) / 2, baseFor(y, bhei, FONT_SANS, 22), labels[i], FONT_SANS, 22, false, hov && !th.dark ? 0xFFFFFFFF : (hov ? th.bg : 0xFFFFFFFF));
+            g_vpBtns.push_back({x, y, bwid, bhei, i + 1});
+            x += bwid + gap;
+        }
+    }
+    if (g_vpStats) {
+        char l1[200], l2[200];
+        snprintf(l1, sizeof(l1), "Video %dx%d   %.1f fps   fotogramas: %lu", vi.vw, vi.vh, vi.fps, vi.frames);
+        snprintf(l2, sizeof(l2), "Decodificador: %s   audio: %s   bufer: %d%%", vi.vdec == 0 ? "sistema" : (vi.vdec == 2 ? "software" : "software 2"), vi.hasAudio ? "si" : "no", vi.bufPct);
+        cv.rrect(40, 90, 900, 120, 10, 0xB0000000);
+        te_draw(cv, 60, 126, l1, FONT_SANS, 19, false, 0xFFFFFFFF);
+        te_draw(cv, 60, 156, l2, FONT_SANS, 19, false, 0xFFFFFFFF);
+        te_draw(cv, 60, 186, te_fit("Estado: " + vi.stage, 860, FONT_SANS, 19, false), FONT_SANS, 19, false, 0xFFCCCCCC);
+    }
+    if (!g_toast.empty() && now < g_toastUntil) {
+        const std::string t = te_fit(g_toast, 900, FONT_SANS, 22, false);
+        const int tw = te_width(t, FONT_SANS, 22, false);
+        cv.rrect(W - tw - 80, 90, tw + 40, 48, 10, 0xCC000000);
+        te_draw(cv, W - tw - 60, baseFor(90, 48, FONT_SANS, 22), t, FONT_SANS, 22, false, g_toastBad ? th.bad : 0xFFFFFFFF);
+    }
+}
+static void videoAction(int id) {
+    switch (id) {
+        case 1: vp_seek_rel(-10000); break;
+        case 2: vp_pause_toggle(); break;
+        case 3: vp_seek_rel(10000); break;
+        case 4: vp_volume_rel(-10); vpVolToast(); break;
+        case 5: vp_volume_rel(10); vpVolToast(); break;
+        case 6: closeVideo(); break;
+        default: break;
+    }
+}
+static void videoKey(int code) {
+    g_vpLastAct = SDL_GetTicks();
+    g_dirty = true;
+    switch (code) {
+        case K_SPACE: case K_K: vp_pause_toggle(); break;
+        case K_LEFT: vp_seek_rel(-10000); break;
+        case K_RIGHT: vp_seek_rel(10000); break;
+        case K_J: vp_seek_rel(-30000); break;
+        case K_L: vp_seek_rel(30000); break;
+        case K_UP: vp_volume_rel(5); vpVolToast(); break;
+        case K_DOWN: vp_volume_rel(-5); vpVolToast(); break;
+        case K_HOME: vp_seek_abs(0); break;
+        case K_H: g_cfg.vhalf = !g_cfg.vhalf; configSave(); toast(g_cfg.vhalf ? "Calidad: media resolucion" : "Calidad: completa"); break;
+        case K_I: g_vpStats = !g_vpStats; break;
+        case K_ESC: case K_BACKSPACE: case K_Q: closeVideo(); break;
+        default: break;
+    }
+}
+static void videoPad(int button) {  // 0 pausa, 1 cierra, 2 calidad, 3 informacion, 4/5 -+30 s
+    g_vpLastAct = SDL_GetTicks();
+    g_dirty = true;
+    switch (button) {
+        case 0: vp_pause_toggle(); break;
+        case 1: closeVideo(); break;
+        case 2: g_cfg.vhalf = !g_cfg.vhalf; configSave(); toast(g_cfg.vhalf ? "Calidad: media resolucion" : "Calidad: completa"); break;
+        case 3: g_vpStats = !g_vpStats; break;
+        case 4: vp_seek_rel(-30000); break;
+        case 5: vp_seek_rel(30000); break;
+        default: break;
+    }
+}
+static void videoHat(int v) {  // cruceta: izquierda/derecha = -+10 s, arriba/abajo = volumen
+    g_vpLastAct = SDL_GetTicks();
+    g_dirty = true;
+    if (v & SDL_HAT_LEFT) vp_seek_rel(-10000);
+    if (v & SDL_HAT_RIGHT) vp_seek_rel(10000);
+    if (v & SDL_HAT_UP) { vp_volume_rel(5); vpVolToast(); }
+    if (v & SDL_HAT_DOWN) { vp_volume_rel(-5); vpVolToast(); }
+}
+static void videoClick() {
+    g_vpLastAct = SDL_GetTicks();
+    g_dirty = true;
+    for (const VpBtn& vb : g_vpBtns)
+        if (g_mx >= vb.x && g_mx < vb.x + vb.w && g_my >= vb.y && g_my < vb.y + vb.h) { videoAction(vb.id); return; }
+    if (g_vpBar[2] > 0 && g_mx >= g_vpBar[0] && g_mx < g_vpBar[0] + g_vpBar[2] && g_my >= g_vpBar[1] && g_my < g_vpBar[1] + g_vpBar[3]) {
+        const VpInfo vi = vp_info();
+        if (vi.durMs > 0) {
+            const float fr = std::max(0.0f, std::min(1.0f, static_cast<float>(g_mx - (g_vpBar[0] + 12)) / static_cast<float>(g_vpBar[2] - 24)));
+            vp_seek_abs(static_cast<uint64_t>(fr * static_cast<float>(vi.durMs)));
+        }
+        return;
+    }
+    vp_pause_toggle();  // clic en el video = pausa / seguir
+}
+// ------------------------------------------------------------------ dialogo de salida
+static void drawQuit(Canvas& cv) {
+    const Theme& th = g_th;
+    const int bw = 720, bh = 260, bx = (W - bw) / 2, by = (H - bh) / 2;
+    cv.rrect(bx + 4, by + 6, bw, bh, 16, 0x66000000);
+    cv.rrect(bx - 2, by - 2, bw + 4, bh + 4, 16, th.rule);
+    cv.rrect(bx, by, bw, bh, 14, th.toolbar);
+    te_draw(cv, bx + 40, by + 70, "Salir de PS Browser?", FONT_SANS, 30, true, th.text);
+    te_draw(cv, bx + 40, by + 108, "Se cerrara el navegador y volveras a la pantalla de inicio de la consola.", FONT_SANS, 18, false, th.dim);
+    const int y = by + bh - 100, h = 56, w = 300;
+    const char* lab[2] = {"Salir", "Cancelar"};
+    for (int i = 0; i < 2; i++) {
+        const int x = bx + 40 + i * (w + 40);
+        g_quitBtn[i][0] = x; g_quitBtn[i][1] = y; g_quitBtn[i][2] = w; g_quitBtn[i][3] = h;
+        const bool hov = g_mouseOk && g_mx >= x && g_mx < x + w && g_my >= y && g_my < y + h;
+        cv.rrectBorder(x, y, w, h, 10, hov ? 3 : 1, hov ? th.accent : th.btnBorder, i == 0 ? th.accent : th.btnBg);
+        const int tw = te_width(lab[i], FONT_SANS, 24, true);
+        te_draw(cv, x + (w - tw) / 2, baseFor(y, h, FONT_SANS, 24), lab[i], FONT_SANS, 24, true, i == 0 ? (th.dark ? th.bg : 0xFFFFFFFF) : th.text);
+    }
+    te_draw(cv, bx + 40, by + bh - 20, "Mando: X salir, O cancelar   Teclado: Intro salir, Esc cancelar", FONT_SANS, 16, false, th.dim);
+}
+static void quitClick() {
+    for (int i = 0; i < 2; i++) {
+        if (g_mx >= g_quitBtn[i][0] && g_mx < g_quitBtn[i][0] + g_quitBtn[i][2] && g_my >= g_quitBtn[i][1] && g_my < g_quitBtn[i][1] + g_quitBtn[i][3]) {
+            if (i == 0) g_quit = true;
+            else { g_quitAsk = false; g_dirty = true; }
+            return;
+        }
+    }
+}
+// Salida: cierra el video y termina el proceso con _exit (evita destructores estaticos con hilos vivos). Un hilo vigilante fuerza la salida
+// si algo se atasca al cerrar (p. ej. el reproductor).
+static void hardExit() {
+    psb_log("[quit] saliendo");
+    std::thread([] { SDL_Delay(2500); psb_log("[quit] salida forzada por el vigilante"); _exit(0); }).detach();
+    if (vp_active()) vp_close();
+    imgw_pause(true);
+    psb_log("[quit] adios");
+    _exit(0);
+}
 static void drawFrame() {
     Canvas& cv = *g_cv;
+    if (g_vpMode) {  // el video ocupa toda la pantalla
+        g_ui.clear();
+        drawVideoUi(cv);
+        if (g_quitAsk) drawQuit(cv);
+        return;
+    }
     Browser& b = B;
     const Theme& th = g_th;
     g_ui.clear();
@@ -1550,6 +1958,7 @@ static void drawFrame() {
     drawCtx(cv);
     if (g_dlp.active) drawDownload(cv);
     if (g_osk.open) osk_draw(g_osk, cv, th, W, H, g_caret);
+    if (g_quitAsk) drawQuit(cv);
 }
 static void renderFrame() {
     SDL_RenderClear(g_ren);
@@ -1594,6 +2003,13 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
     static int logged = 0;
     if (logged < 60) { logged++; psb_log("tecla: codigo=%d char=%d mods=0x%x", code, ch, mods); }
     Browser& b = B;
+    if (g_quitAsk) {  // dialogo de salida: Intro o Y salen, Esc o N cancelan
+        if (code == K_RETURN || code == K_Y) g_quit = true;
+        else if (code == K_ESC || code == K_N) { g_quitAsk = false; g_dirty = true; }
+        return;
+    }
+    if (ctrl && code == K_Q) { quitAsk(); return; }
+    if (g_vpMode) { videoKey(code); return; }  // el video captura todo el teclado
     if (g_ctx.open) {  // el menu contextual captura el teclado
         if (code == K_ESC || code == K_APP) { g_ctx.open = false; g_dirty = true; }
         else if (code == K_UP) ctxMove(-1);
@@ -1710,6 +2126,7 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
         case K_F6: startUrlEdit(b, isInternal(b.url) ? "" : b.url, true); return;
         case K_F5: reload(b); return;
         case K_F10: if (shift) ctxOpenAtFocus(); else navigate(b, "about:settings", true); return;
+        case K_F8: navigate(b, "about:videos", true); return;
         case K_APP: ctxOpenAtFocus(); return;
         case K_BACKSPACE: goBack(b); return;
         case K_LEFT: if (alt) { goBack(b); return; } break;
@@ -1733,6 +2150,7 @@ struct Held {
     uint32_t downAt, lastRep;
 };
 static bool repeatable(uint16_t code) {
+    if (g_vpMode) return code == K_LEFT || code == K_RIGHT || code == K_UP || code == K_DOWN;
     if (code == K_UP || code == K_DOWN || code == K_PGUP || code == K_PGDOWN) return true;
     if (B.urlEdit || B.editField >= 0) return code != K_RETURN && code != K_ESC && code != K_TAB;
     return false;
@@ -1748,6 +2166,8 @@ static void updateHover(int x, int y) {
 }
 static void mouseLeftPress(bool& dragging, int& dragOff) {
     Browser& b = B;
+    if (g_quitAsk) { quitClick(); return; }
+    if (g_vpMode) { videoClick(); return; }
     if (g_ctx.open) {  // menu contextual: clic en un elemento lo ejecuta; fuera lo cierra
         const int hi = ctxHit(g_mx, g_my);
         if (hi >= 0) ctxRun(hi);
@@ -1769,6 +2189,7 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
             case UI_STAR: toggleBookmark(b); break;
             case UI_BMARKS: navigate(b, "about:bookmarks", true); break;
             case UI_MENU: navigate(b, "about:settings", true); break;
+            case UI_POWER: quitAsk(); break;
             case UI_SBAR:
                 if (g_thumbH > 0 && g_my >= g_thumbY && g_my < g_thumbY + g_thumbH) { dragging = true; dragOff = g_my - g_thumbY; }
                 else scrollBy(b, g_my < g_thumbY ? -VIEW_H * 9 / 10 : VIEW_H * 9 / 10);
@@ -1792,7 +2213,7 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.7.0 ==");
+    psb_log("== psbrowser v0.8.0 ==");
     configLoad();
     bookmarksLoad();
     dlListLoad();
@@ -1846,6 +2267,12 @@ int main(int, char**) {
                 case SDL_QUIT: running = false; break;
                 case SDL_JOYBUTTONDOWN:
                     psb_log("boton %d", e.jbutton.button);
+                    if (g_quitAsk) {  // X = salir, O = cancelar
+                        if (e.jbutton.button == 0) g_quit = true;
+                        else if (e.jbutton.button == 1) { g_quitAsk = false; g_dirty = true; }
+                        break;
+                    }
+                    if (g_vpMode) { videoPad(e.jbutton.button); break; }
                     if (g_ctx.open) {  // menu contextual con el mando: cruceta = mover, X = elegir, O = cerrar
                         if (e.jbutton.button == 0) { if (g_ctx.sel >= 0) ctxRun(g_ctx.sel); }
                         else if (e.jbutton.button == 1 || e.jbutton.button == 11) { g_ctx.open = false; g_dirty = true; }
@@ -1885,6 +2312,8 @@ int main(int, char**) {
                     break;
                 case SDL_JOYHATMOTION:
                     psb_log("hat %d", e.jhat.value);
+                    if (g_quitAsk) break;
+                    if (g_vpMode) { videoHat(e.jhat.value); break; }
                     if (g_ctx.open) {
                         if (e.jhat.value & SDL_HAT_UP) ctxMove(-1);
                         if (e.jhat.value & SDL_HAT_DOWN) ctxMove(1);
@@ -1906,11 +2335,12 @@ int main(int, char**) {
                     if (e.jhat.value & SDL_HAT_RIGHT) goForward(B);
                     break;
                 case SDL_JOYAXISMOTION:
-                    if (e.jaxis.axis == 1 || e.jaxis.axis == 3) padAxis = (!g_osk.open && std::abs(e.jaxis.value) > 6000) ? e.jaxis.value : 0;
+                    if (e.jaxis.axis == 1 || e.jaxis.axis == 3) padAxis = (!g_osk.open && !g_vpMode && !g_quitAsk && std::abs(e.jaxis.value) > 6000) ? e.jaxis.value : 0;
                     break;
                 default: break;
             }
         }
+        if (g_quit) running = false;
         if (padAxis != 0) {  // stick izquierdo: scroll continuo proporcional (hasta ~1500 px/s)
             const float v = (std::abs(padAxis) - 6000) / 26767.0f;
             padAcc += (padAxis < 0 ? -1.0f : 1.0f) * v * v * 1.5f * dt + (padAxis < 0 ? -1.0f : 1.0f) * v * 0.2f * dt;
@@ -1965,6 +2395,8 @@ int main(int, char**) {
                     g_mx = std::max(0, std::min(W - 1, g_mx + ix));
                     g_my = std::max(0, std::min(H - 1, g_my + iy));
                     moved = true;
+                    if (g_vpMode) g_vpLastAct = now;  // mover el raton muestra los controles del video
+                    if (g_vpMode || g_quitAsk) g_dirty = true;
                     if (dragging && (ms.buttons & 1) && g_thumbH > 0) {
                         const int track = VIEW_H - g_thumbH;
                         const float r = track > 0 ? static_cast<float>(g_my - dragOff - VIEW_Y) / track : 0.0f;
@@ -1977,7 +2409,8 @@ int main(int, char**) {
                         updateHover(g_mx, g_my);
                     }
                 }
-                if (ms.wheel && !g_osk.open && !g_ctx.open) {
+                if (ms.wheel && g_vpMode && !g_quitAsk) { vp_volume_rel(ms.wheel > 0 ? 5 : -5); vpVolToast(); g_vpLastAct = now; }
+                if (ms.wheel && !g_osk.open && !g_ctx.open && !g_vpMode && !g_quitAsk) {
                     static int wlog = 0;
                     if (wlog < 10) { wlog++; psb_log("rueda: %d", ms.wheel); }
                     scrollBy(B, ((ms.wheel > 0) != g_cfg.wheelInvert ? -1 : 1) * g_cfg.wheelStep * 40);
@@ -1985,10 +2418,10 @@ int main(int, char**) {
                 const uint32_t pressed = ms.buttons & ~prevButtons;
                 if ((pressed & 1) && !g_osk.open) mouseLeftPress(dragging, dragOff);
                 if (!(ms.buttons & 1)) dragging = false;
-                if ((pressed & 2) && !g_osk.open) ctxOpen(g_mx, g_my);  // clic derecho = menu contextual (Atras esta dentro del menu)
-                if ((pressed & 8) && !g_osk.open && !g_ctx.open) goBack(B);     // botones laterales (si el raton los tiene)
-                if ((pressed & 16) && !g_osk.open && !g_ctx.open) goForward(B);
-                if ((pressed & 4) && !g_ctx.open) {  // central: enlace en pestana nueva / cerrar pestana
+                if ((pressed & 2) && !g_osk.open && !g_vpMode && !g_quitAsk) ctxOpen(g_mx, g_my);  // clic derecho = menu contextual (Atras esta dentro del menu)
+                if ((pressed & 8) && !g_osk.open && !g_ctx.open && !g_vpMode && !g_quitAsk) goBack(B);     // botones laterales (si el raton los tiene)
+                if ((pressed & 16) && !g_osk.open && !g_ctx.open && !g_vpMode && !g_quitAsk) goForward(B);
+                if ((pressed & 4) && !g_ctx.open && !g_vpMode && !g_quitAsk) {  // central: enlace en pestana nueva / cerrar pestana
                     const int ui = uiAt(g_mx, g_my);
                     if (ui >= 0 && g_ui[ui].kind == UI_TAB) closeTab(g_ui[ui].arg);
                     else {
@@ -2016,7 +2449,21 @@ int main(int, char**) {
             if (B.urlEdit || B.editField >= 0 || g_osk.open) g_dirty = true;
         }
         if (g_toastUntil && now > g_toastUntil) { g_toastUntil = 0; g_toast.clear(); g_dirty = true; }
-        if (now - lastPump > 120) { lastPump = now; pumpImages(); }
+        if (now - lastPump > 120) { lastPump = now; if (!g_vpMode) pumpImages(); }
+        if (g_vpMode) {  // fotogramas nuevos, cambios de estado y reloj del overlay
+            if (!vp_active()) { g_vpMode = false; imgw_pause(false); g_dirty = true; }
+            else {
+                if (vp_update()) g_dirty = true;
+                const VpInfo vi = vp_info();
+                static VpState lastSt = VP_CLOSED;
+                static bool lastOv = false;
+                static uint32_t lastClk = 0;
+                const bool ov = vpOverlayVisible(now, vi);
+                if (vi.state != lastSt) { lastSt = vi.state; g_dirty = true; }
+                if (ov != lastOv) { lastOv = ov; g_dirty = true; }
+                if (ov && now - lastClk > 250) { lastClk = now; g_dirty = true; }
+            }
+        }
         if (g_dirty) {
             const uint32_t t0 = SDL_GetTicks();
             drawFrame();
@@ -2032,6 +2479,6 @@ int main(int, char**) {
         }
         SDL_Delay(4);
     }
-    net_shutdown();
+    hardExit();  // no vuelve: _exit(0)
     return 0;
 }

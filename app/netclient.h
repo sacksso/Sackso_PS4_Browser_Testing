@@ -16,6 +16,7 @@ struct HttpResult {
     bool stopped = false;     // la puerta (HttpGate) pidio no leer el cuerpo: solo hay cabeceras
     std::string contentDisposition;  // cabecera Content-Disposition (nombre de archivo en descargas)
     long long received = 0;   // bytes entregados a un HttpSink
+    long long rangeTotal = -1;  // tamano total del archivo segun 'Content-Range: bytes a-b/TOTAL' (respuestas 206), -1 si no hay
     std::string body;
 };
 
@@ -31,6 +32,12 @@ struct HttpSink {
 // Si devuelve false no se lee el cuerpo y el resultado queda con stopped=true (la peticion cuenta como correcta).
 typedef bool (*HttpGate)(const HttpResult& r);
 
+// Cabeceras opcionales de una peticion: lectura por rangos (reproductor de video en streaming) y Referer.
+struct HttpExtra {
+    long long rangeStart = -1, rangeEnd = -1;  // rangeStart >= 0 => 'Range: bytes=start-end' (end = -1: hasta el final)
+    std::string referer;
+};
+
 // Cuerpo de un POST (por ejemplo application/x-www-form-urlencoded).
 struct HttpPost {
     std::string body;
@@ -45,4 +52,7 @@ bool http_get(const std::string& url, HttpResult& out, size_t maxBody = 1024 * 1
 // 'sink' (opcional): el cuerpo va al sink (descarga de un archivo, sin limite de tamano; se pide sin compresion).
 // 'gate' (opcional): ver HttpGate.
 bool http_request(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody = 1024 * 1024, int maxRedirects = 5,
-                  HttpSink* sink = nullptr, HttpGate gate = nullptr);
+                  HttpSink* sink = nullptr, HttpGate gate = nullptr, const HttpExtra* extra = nullptr);
+// Lee los bytes [start, start+len) de 'url' con 'Range'. true = respuesta 206 con Content-Range (o 200 si el archivo cabe en 'len').
+// out.body = datos, out.rangeTotal = tamano total. Si el servidor ignora Range y devuelve el archivo entero (200) mas grande que len -> false.
+bool http_range(const std::string& url, long long start, long long len, const std::string& referer, HttpResult& out, int maxRedirects = 5);

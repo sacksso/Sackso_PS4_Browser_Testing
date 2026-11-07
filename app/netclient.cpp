@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -119,11 +120,12 @@ static std::string resolveUrl(const std::string& base, const std::string& loc) {
 
 // compat=true: conexion sin keep-alive y con cabeceras Accept / Accept-Encoding explicitas (reintento tras un fallo en sendRequest).
 static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, std::string& redirectTo, bool compat,
-                      HttpSink* sink, HttpGate gate) {
+                      HttpSink* sink, HttpGate gate, const HttpExtra* extra) {
     redirectTo.clear();
     out.stage.clear();
     out.contentDisposition.clear();
     out.contentLength = -1;
+    out.rangeTotal = -1;
     out.stopped = false;
     out.sceError = 0;
     int tpl = 0, conn = 0, req = 0;
@@ -160,7 +162,7 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
     if (compat) {
         sceHttpAddRequestHeader(req, "Accept", "text/html,*/*;q=0.8", 0);
         sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 0);
-    } else if (sink) {  // descarga de un archivo: tal cual, sin recompresion
+    } else if (sink || (extra && extra->rangeStart >= 0)) {  // descarga/lectura por rangos: tal cual, sin recompresion
         sceHttpAddRequestHeader(req, "Accept", "*/*", 0);
         sceHttpAddRequestHeader(req, "Accept-Language", "es-ES,es;q=0.9,en;q=0.7", 0);
         sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 0);
@@ -170,6 +172,15 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
         sceHttpAddRequestHeader(req, "Accept-Encoding", "gzip, deflate", 0);
     }
     if (post) sceHttpAddRequestHeader(req, "Content-Type", post->contentType.c_str(), 0);
+    if (extra) {
+        if (extra->rangeStart >= 0) {
+            char rg[80];
+            if (extra->rangeEnd >= extra->rangeStart) snprintf(rg, sizeof(rg), "bytes=%lld-%lld", extra->rangeStart, extra->rangeEnd);
+            else snprintf(rg, sizeof(rg), "bytes=%lld-", extra->rangeStart);
+            sceHttpAddRequestHeader(req, "Range", rg, 0);
+        }
+        if (!extra->referer.empty()) sceHttpAddRequestHeader(req, "Referer", extra->referer.c_str(), 0);
+    }
     {
         int rc = post ? sceHttpSendRequest(req, post->body.data(), post->body.size()) : sceHttpSendRequest(req, nullptr, 0);
         if (rc < 0) { fail("sendRequest", rc); goto done; }
@@ -184,6 +195,11 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
             out.contentType = headerValue(hdrs, hdrLen, "Content-Type");
             encoding = headerValue(hdrs, hdrLen, "Content-Encoding");
             out.contentDisposition = headerValue(hdrs, hdrLen, "Content-Disposition");
+            {   // Content-Range: bytes 0-1048575/33496987
+                const std::string cr = headerValue(hdrs, hdrLen, "Content-Range");
+                const size_t sl = cr.rfind('/');
+                if (sl != std::string::npos && sl + 1 < cr.size() && cr[sl + 1] != '*') out.rangeTotal = atoll(cr.c_str() + sl + 1);
+            }
             // Registro de las cabeceras (hasta ~1500 bytes, en trozos) para diagnosticar.
             std::string h(hdrs, hdrLen > 1500 ? 1500 : hdrLen);
             for (auto& c : h) if (c == '\r') c = ' '; else if (c == '\n') c = '|';
@@ -246,7 +262,7 @@ done:
 }
 
 bool http_request(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, int maxRedirects, HttpSink* sink,
-                  HttpGate gate) {
+                  HttpGate gate, const HttpExtra* extra) {
     static std::mutex httpMutex;  // libSceHttp se usa desde el hilo principal y el de imagenes: una peticion a la vez
     std::lock_guard<std::mutex> httpLock(httpMutex);
     out = HttpResult();
@@ -256,10 +272,10 @@ bool http_request(const std::string& url, const HttpPost* post, HttpResult& out,
         out.finalUrl = cur;
         std::string next;
         psb_log("[http] %s %s", post ? "POST" : "GET", cur.c_str());
-        bool good = singleGet(cur, post, out, maxBody, next, false, sink, gate);
+        bool good = singleGet(cur, post, out, maxBody, next, false, sink, gate, extra);
         if (!good && (out.stage == "sendRequest" || out.stage == "decode")) {
             psb_log("[http] reintento en modo compat (sin keep-alive, Accept-Encoding: identity)");
-            good = singleGet(cur, post, out, maxBody, next, true, sink, gate);
+            good = singleGet(cur, post, out, maxBody, next, true, sink, gate, extra);
             psb_log("[http] reintento: %s", good ? "OK" : "FALLO tambien");
         }
         if (!good) return false;
@@ -276,4 +292,19 @@ bool http_request(const std::string& url, const HttpPost* post, HttpResult& out,
 
 bool http_get(const std::string& url, HttpResult& out, size_t maxBody, int maxRedirects) {
     return http_request(url, nullptr, out, maxBody, maxRedirects);
+}
+
+bool http_range(const std::string& url, long long start, long long len, const std::string& referer, HttpResult& out, int maxRedirects) {
+    HttpExtra ex;
+    ex.rangeStart = start;
+    ex.rangeEnd = start + len - 1;
+    ex.referer = referer;
+    // maxBody = len: si el servidor ignora Range y manda el archivo entero (200), el cuerpo se corta y 'truncated' avisa.
+    if (!http_request(url, nullptr, out, static_cast<size_t>(len), maxRedirects, nullptr, nullptr, &ex)) return false;
+    if (out.status == 206) return true;
+    if (out.status == 200 && !out.truncated) {  // el archivo entero cabia en el trozo pedido
+        out.rangeTotal = static_cast<long long>(out.body.size());
+        return start == 0;
+    }
+    return false;
 }
