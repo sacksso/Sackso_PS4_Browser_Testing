@@ -20,6 +20,10 @@ on:
         description: 'TLS estricto (rechaza certificados no validos). Por defecto true: en la prueba 1 todos los HTTPS dieron verifyErr=0'
         type: boolean
         default: true
+      js_engine:
+        description: 'Incluir JavaScript (QuickJS-ng v0.18.0 + DOM + CSS lite). Si el build con JS falla, se reintenta solo sin motor (-DPSB_NO_JS) y queda registrado en logs/js_fallback.txt'
+        type: boolean
+        default: true
       probe_js:
         description: 'Sonda de JavaScript: descarga QuickJS-ng y prueba a compilarlo con los flags de OpenOrbis (solo escribe logs/quickjs_probe.txt, no toca el PKG)'
         type: boolean
@@ -98,6 +102,7 @@ jobs:
       - name: Compilar (EBOOT + PKG)
         env:
           STRICT: ${{ inputs.strict_tls }}
+          JS_ENGINE: ${{ inputs.js_engine }}
         run: |
           set -euo pipefail
           # Copia de todo samples/ (el Makefile busca los fuentes en <PROJDIR>/ y los samples esperan _common al lado).
@@ -127,12 +132,39 @@ jobs:
           # -O2: sin optimizacion el dibujo del lienzo (bucles por pixel) era ~5-10x mas lento (v0.4.1 compilaba sin -O).
           extra="-O2"
           if [ "$STRICT" = "true" ]; then extra="$extra -DPSB_STRICT_TLS"; fi
-          echo "EXTRAFLAGS='$extra'" | tee logs/flags.txt
           cd "$work"
           cat Makefile > "$GITHUB_WORKSPACE/logs/makefile.txt"
+          # --- JavaScript (v0.9.0): QuickJS-ng fijado a v0.18.0 (la version con la que se probo la capa jsx en el PC).
+          # Se copian a psbrowser/ solo los .c/.h necesarios (el Makefile compila psbrowser/*.c) y el shim de malloc_np.h.
+          js_ok=0
+          if [ "$JS_ENGINE" = "true" ]; then
+            if git clone -q --depth 1 --branch v0.18.0 https://github.com/quickjs-ng/quickjs "$RUNNER_TEMP/qjs" 2>>"$GITHUB_WORKSPACE/logs/js_clone.txt"; then
+              for f in quickjs dtoa libregexp libunicode; do
+                { echo '#define NDEBUG 1'; echo '#define __STDC_NO_ATOMICS__ 1'; cat "$RUNNER_TEMP/qjs/$f.c"; } > "$work/$proj/qjs_$f.c"
+              done
+              cp "$RUNNER_TEMP/qjs/"*.h "$work/$proj/"
+              cp "$GITHUB_WORKSPACE/third_party/qjs_shim/malloc_np.h" "$GITHUB_WORKSPACE/third_party/qjs_shim/psb_qjs_shim.c" "$work/$proj/"
+              js_ok=1
+            else
+              echo "no se pudo clonar quickjs-ng" >> "$GITHUB_WORKSPACE/logs/js_fallback.txt"
+            fi
+          fi
+          if [ "$js_ok" = "1" ]; then flags="$extra -I$proj"; else flags="$extra -DPSB_NO_JS"; fi
+          echo "EXTRAFLAGS='$flags'" | tee "$GITHUB_WORKSPACE/logs/flags.txt"
           set +e
-          make EXTRAFLAGS="$extra" 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
+          make EXTRAFLAGS="$flags" 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
           rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ] && [ "$js_ok" = "1" ]; then
+            echo "::warning::El build con JavaScript fallo: se reintenta sin motor (-DPSB_NO_JS). Mira logs/build_js_failed.log"
+            cp "$GITHUB_WORKSPACE/logs/build.log" "$GITHUB_WORKSPACE/logs/build_js_failed.log"
+            echo "build con QuickJS fallo (rc=$rc); PKG generado sin JavaScript (solo DOM + CSS lite)" > "$GITHUB_WORKSPACE/logs/js_fallback.txt"
+            rm -f "$work/$proj"/qjs_*.c "$work/$proj"/psb_qjs_shim.c "$work/$proj/malloc_np.h"
+            rm -rf "$work/$proj/x64"
+            flags="$extra -DPSB_NO_JS"
+            echo "EXTRAFLAGS='$flags'" | tee "$GITHUB_WORKSPACE/logs/flags.txt"
+            make EXTRAFLAGS="$flags" 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
+            rc=${PIPESTATUS[0]}
+          fi
           set -e
           mkdir -p "$GITHUB_WORKSPACE/dist"
           find . -name '*.pkg' -exec cp {} "$GITHUB_WORKSPACE/dist/" \;
