@@ -41,6 +41,12 @@ static void drawCheck(Canvas& cv, const Theme& th, int x, int y, int sz, bool ra
     }
 }
 
+static std::string lowerAscii(const std::string& t) {
+    std::string o = t;
+    for (char& c : o) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+    return o;
+}
+
 void drawDocument(Canvas& cv, const Document& d, const RenderCtx& rc) {
     const Theme& th = *rc.th;
     cv.setClip(rc.viewX, rc.viewY, rc.viewX + rc.viewW, rc.viewY + rc.viewH);
@@ -59,7 +65,11 @@ void drawDocument(Canvas& cv, const Document& d, const RenderCtx& rc) {
                 case SK_TEXT: {
                     if (s.role == ROLE_CODE) cv.rect(sx - 2, top, s.w + 4, L.h, th.codeBg);
                     if (hot && s.role == ROLE_LINK) cv.rrect(sx - 3, top + 1, s.w + 6, L.h - 2, 4, th.focusBg);
-                    const uint32_t col = roleColor(th, s);
+                    uint32_t col = roleColor(th, s);
+                    if (rc.find && !rc.find->empty() && lowerAscii(s.text).find(*rc.find) != std::string::npos) {
+                        cv.rect(sx - 2, top + 1, s.w + 4, L.h - 2, li == rc.findLine ? 0xFFFF9632u : 0xFFFFE066u);
+                        col = 0xFF000000u;  // texto negro sobre el resaltado: contraste garantizado en tema claro y oscuro
+                    }
                     te_draw(cv, sx, base, s.text, s.font, s.size, s.bold, col);
                     if (s.role == ROLE_LINK) cv.rect(sx, base + 2, s.w, hot ? 2 : 1, col);
                     break;

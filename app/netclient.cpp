@@ -16,6 +16,8 @@
 
 #include "log.h"
 
+std::string g_netUserAgent = "Mozilla/5.0 (PlayStation 4; psbrowser/0.2)";
+
 // Tamanos de pools habituales en homebrew de PS4.
 static const int NET_POOL_SIZE = 16 * 1024;
 static const size_t SSL_POOL_SIZE = 300 * 1024;
@@ -137,7 +139,7 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
         psb_log("[http] %s fallo 0x%08X (%s)", stage, static_cast<unsigned>(code), url.c_str());
     };
 
-    tpl = sceHttpCreateTemplate(g_httpCtxId, "Mozilla/5.0 (PlayStation 4; psbrowser/0.2)", ORBIS_HTTP_VERSION_1_1, 1);
+    tpl = sceHttpCreateTemplate(g_httpCtxId, g_netUserAgent.c_str(), ORBIS_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { fail("createTemplate", tpl); tpl = 0; goto done; }
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);

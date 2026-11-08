@@ -73,6 +73,11 @@ std::string urlPercentEncode(const std::string& s) {
     return o;
 }
 
+int g_searchEngine = 0;
+static const char* kEngineName[] = {"DuckDuckGo", "DuckDuckGo Lite", "Bing", "Google", "Startpage"};
+static const char* kEngineUrl[] = {"https://html.duckduckgo.com/html/?q=", "https://lite.duckduckgo.com/lite/?q=", "https://www.bing.com/search?q=",
+                                   "https://www.google.com/search?q=", "https://www.startpage.com/do/search?q="};
+const char* urlSearchEngineName(int idx) { return kEngineName[(idx >= 0 && idx < 5) ? idx : 0]; }
 std::string urlFromUserInput(const std::string& in) {
     size_t a = in.find_first_not_of(' ');
     size_t b = in.find_last_not_of(' ');
@@ -82,7 +87,7 @@ std::string urlFromUserInput(const std::string& in) {
     bool hasSpace = s.find(' ') != std::string::npos;
     bool hasDot = s.find('.') != std::string::npos;
     if (!hasSpace && (hasDot || s.compare(0, 9, "localhost") == 0)) return "https://" + s;
-    return "https://html.duckduckgo.com/html/?q=" + urlPercentEncode(s);
+    return std::string(kEngineUrl[(g_searchEngine >= 0 && g_searchEngine < 5) ? g_searchEngine : 0]) + urlPercentEncode(s);
 }
 
 std::string urlPercentDecode(const std::string& s) {

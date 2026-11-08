@@ -23,6 +23,7 @@
 #include <cstring>
 #include <map>
 #include <sstream>
+#include <functional>
 #include <string>
 #include <sys/stat.h>
 #include <thread>
@@ -70,7 +71,7 @@ static const int TABBAR_H = 40, TOOLBAR_Y = 40, TOOLBAR_H = 48, VIEW_Y = 88, SBA
 static const int VIEW_H = H - VIEW_Y;
 // Codigos de tecla USB HID (los mismos que usa OpenOrbis en orbis/_types/keyboard.h).
 enum {
-    K_A = 4, K_N = 17, K_Y = 28, K_H = 11, K_I = 12, K_K = 14, K_Q = 20, K_F8 = 65, K_C = 6, K_D = 7, K_J = 13, K_L = 15, K_R = 21, K_T = 23, K_V = 25, K_W = 26, K_X = 27, K_1 = 30, K_9 = 38, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
+    K_A = 4, K_N = 17, K_Y = 28, K_H = 11, K_I = 12, K_K = 14, K_Q = 20, K_F8 = 65, K_F9 = 66, K_F = 9, K_F1 = 58, K_F3 = 60, K_C = 6, K_D = 7, K_J = 13, K_L = 15, K_R = 21, K_T = 23, K_V = 25, K_W = 26, K_X = 27, K_1 = 30, K_9 = 38, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
     K_MINUS = 45, K_EQUAL = 46, K_F5 = 62, K_F6 = 63, K_F10 = 67, K_HOME = 74, K_PGUP = 75, K_END = 77, K_PGDOWN = 78,
     K_RIGHT = 79, K_LEFT = 80, K_DOWN = 81, K_UP = 82, K_APP = 101  // K_APP = tecla de menu contextual
 };
@@ -88,6 +89,10 @@ struct Config {
     bool images = true;
     int vdec = 0;             // decodificador de video: 0 sistema (hardware), 2 software, 3 software2
     bool vhalf = true;        // dibujar el video a media resolucion (mas rapido)
+    int vscale = 0;           // tamano del video en la via rapida: 0 ajustar a pantalla, 1 nativo 1:1 (sin escalar), 2 doble (x2 si cabe)
+    int search = 0;           // motor de busqueda de la barra (ver url.h)
+    int ua = 0;               // User-Agent: 0 PS4, 1 Chrome, 2 Firefox, 3 Smart TV, 4 Lynx (paginas simples)
+    bool vpart = false;       // EXPERIMENTAL: actualizar solo el rectangulo del video (SDL_UpdateWindowSurfaceRects) en vez de toda la pantalla
     int volume = 80;          // volumen por defecto del reproductor (0..100)
 };
 static Config g_cfg;
@@ -101,13 +106,23 @@ static void clampCfg() {
     g_cfg.pageW = std::max(800, std::min(1700, g_cfg.pageW));
     if (g_cfg.vdec != 2 && g_cfg.vdec != 3) g_cfg.vdec = 0;
     g_cfg.volume = std::max(0, std::min(100, g_cfg.volume));
+    if (g_cfg.vscale < 0 || g_cfg.vscale > 2) g_cfg.vscale = 0;
+    if (g_cfg.search < 0 || g_cfg.search > 4) g_cfg.search = 0;
+    if (g_cfg.ua < 0 || g_cfg.ua > 4) g_cfg.ua = 0;
+    g_searchEngine = g_cfg.search;
+    static const char* kUA[] = {"Mozilla/5.0 (PlayStation 4; psbrowser/0.2)",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        "Mozilla/5.0 (SMART-TV; Linux; Tizen 6.0) AppleWebKit/537.36 (KHTML, like Gecko) Version/6.0 TV Safari/537.36",
+        "Lynx/2.9.0 libwww-FM/2.14 SSL-MM/1.4.1 OpenSSL/3.0.0"};
+    g_netUserAgent = kUA[g_cfg.ua];
 }
 static void configSave() {
     FILE* f = fopen(kCfgPath, "w");
     if (!f) return;
-    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\n",
+    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\nvscale=%d\nvpart=%d\nsearch=%d\nua=%d\n",
             g_cfg.mouseSens, g_cfg.mouseAccel ? 1 : 0, g_cfg.wheelInvert ? 1 : 0, g_cfg.wheelStep, g_cfg.home.c_str(), g_cfg.dark ? 1 : 0,
-            g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume);
+            g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume, g_cfg.vscale, g_cfg.vpart ? 1 : 0, g_cfg.search, g_cfg.ua);
     fclose(f);
 }
 static void configLoad() {
@@ -133,9 +148,39 @@ static void configLoad() {
         else if (k == "vdec") g_cfg.vdec = atoi(v.c_str());
         else if (k == "vhalf") g_cfg.vhalf = v == "1";
         else if (k == "volume") g_cfg.volume = atoi(v.c_str());
+        else if (k == "vscale") g_cfg.vscale = atoi(v.c_str());
+        else if (k == "vpart") g_cfg.vpart = v == "1";
+        else if (k == "search") g_cfg.search = atoi(v.c_str());
+        else if (k == "ua") g_cfg.ua = atoi(v.c_str());
     }
     fclose(f);
     clampCfg();
+}
+static const char* kHistPath = "/data/psbrowser/history.txt";
+static std::vector<std::pair<std::string, std::string>> g_history;  // (url, titulo), la mas reciente al final
+static void historySave() {
+    FILE* f = fopen(kHistPath, "w");
+    if (!f) return;
+    for (auto& h : g_history) fprintf(f, "%s\t%s\n", h.first.c_str(), h.second.c_str());
+    fclose(f);
+}
+static void historyLoad() {
+    FILE* f = fopen(kHistPath, "r");
+    if (!f) return;
+    char line[1200];
+    while (fgets(line, sizeof(line), f)) {
+        std::string l(line);
+        while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+        const size_t t = l.find('\t');
+        if (t != std::string::npos) g_history.push_back({l.substr(0, t), l.substr(t + 1)});
+    }
+    fclose(f);
+}
+static void historyAdd(const std::string& url, const std::string& title) {
+    if (!g_history.empty() && g_history.back().first == url) { g_history.back().second = title; return; }
+    g_history.push_back({url, title});
+    if (g_history.size() > 300) g_history.erase(g_history.begin());
+    historySave();
 }
 static void bookmarksSave() {
     FILE* f = fopen(kBmPath, "w");
@@ -391,7 +436,7 @@ static std::string genHome() {
         "<html><head><title>Inicio</title></head><body><h1>psbrowser</h1>"
         "<form action=\"https://html.duckduckgo.com/html/\" method=\"get\">"
         "<input type=\"text\" name=\"q\" placeholder=\"Buscar con DuckDuckGo\"> <input type=\"submit\" value=\"Buscar\"></form>"
-        "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:images\">Imagenes de la ultima pagina</a> | <a href=\"about:videos\">Videos de la pagina</a> | <a href=\"psb:quit\">Salir</a></p>"
+        "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:images\">Imagenes de la ultima pagina</a> | <a href=\"about:videos\">Videos de la pagina</a> | <a href=\"about:history\">Historial</a> | <a href=\"about:shortcuts\">Atajos</a> | <a href=\"psb:quit\">Salir</a></p>"
         "<h2>Marcadores</h2>";
     if (g_bookmarks.empty()) h += "<p>Aun no hay marcadores: pulsa la estrella de la barra (o Ctrl+D) en una pagina.</p>";
     else {
@@ -415,7 +460,8 @@ static std::string genHome() {
     return h;
 }
 static std::string genSettings() {
-    char b[6200];
+    char b[7600];
+    static const char* kUaName[] = {"PS4 (por defecto)", "Chrome (Windows)", "Firefox (Windows)", "Smart TV (Tizen)", "Lynx (paginas simples)"};
     const char* vd = g_cfg.vdec == 2 ? "software" : (g_cfg.vdec == 3 ? "software 2" : "sistema (hardware)");
     snprintf(b, sizeof(b),
              "<html><head><title>Configuracion</title></head><body><h1>Configuracion</h1>"
@@ -437,13 +483,26 @@ static std::string genSettings() {
              "<p>Decodificador: <a href=\"psb:vdec\">[ %s ]</a> (si el video no muestra imagen, prueba otro)</p>"
              "<p>Dibujar a media resolucion (mas rapido): <a href=\"psb:vhalf\">[ %s ]</a></p>"
              "<p>Volumen inicial: <a href=\"psb:vol-\">[ - ]</a> %d%% <a href=\"psb:vol+\">[ + ]</a></p>"
+             "<p>Tamano del video (via rapida): <a href=\"psb:vscale\">[ %s ]</a> (1:1 y x2 evitan escalar por CPU)</p>"
+             "<p>Actualizacion parcial de pantalla (experimental): <a href=\"psb:vpart\">[ %s ]</a> (solo sin raton conectado; si el video parpadea, desactivala)</p>"
+             "<p><a href=\"psb:bench\">[ Medir velocidad de presentacion (F9, ~20 s) ]</a> <a href=\"about:bench\">[ ver ultimo resultado ]</a></p>"
              "<h2>Otros</h2><p><a href=\"about:bookmarks\">Marcadores</a> | <a href=\"about:home\">Inicio</a> | <a href=\"about:videos\">Videos de la pagina</a></p>"
              "<p><a href=\"psb:quit\">[ Salir del navegador ]</a></p>"
              "<p>Los cambios se guardan al momento en /data/psbrowser/config.txt. Mueve el raton para probar la sensibilidad.</p>"
              "</body></html>",
              g_cfg.dark ? "oscuro" : "claro", g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? "si" : "no", g_cfg.images ? "si" : "no", g_cfg.mouseSens,
-             g_cfg.mouseAccel ? "si" : "no", g_cfg.wheelInvert ? "si" : "no", g_cfg.wheelStep, htmlEscape(homeUrl()).c_str(), vd, g_cfg.vhalf ? "si" : "no", g_cfg.volume);
-    return b;
+             g_cfg.mouseAccel ? "si" : "no", g_cfg.wheelInvert ? "si" : "no", g_cfg.wheelStep, htmlEscape(homeUrl()).c_str(), vd, g_cfg.vhalf ? "si" : "no", g_cfg.volume,
+             g_cfg.vscale == 1 ? "nativo 1:1" : (g_cfg.vscale == 2 ? "doble x2" : "ajustar a pantalla"), g_cfg.vpart ? "si" : "no");
+    std::string out = b;
+    const std::string extra =
+        "<h2>Navegador</h2>"
+        "<p>Buscador de la barra: <a href=\"psb:search\">[ " + std::string(urlSearchEngineName(g_cfg.search)) + " ]</a></p>"
+        "<p>Identificarse como (User-Agent): <a href=\"psb:ua\">[ " + kUaName[g_cfg.ua] + " ]</a> (se aplica a la siguiente pagina; "
+        "algunas paginas de streaming y de video sirven mas contenido a Chrome/Smart TV, otras dan HTML mas simple a Lynx)</p>"
+        "<p><a href=\"about:shortcuts\">[ Atajos de teclado (F1) ]</a> <a href=\"about:history\">[ Historial (Ctrl+H) ]</a></p>";
+    const size_t e = out.rfind("</body>");
+    out.insert(e == std::string::npos ? out.size() : e, extra);
+    return out;
 }
 static std::string genBookmarks() {
     std::string h = "<html><head><title>Marcadores</title></head><body><h1>Marcadores</h1>";
@@ -569,7 +628,49 @@ static std::string genVideos() {
     h += "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:images\">Imagenes de la pagina</a> | <a href=\"about:home\">Inicio</a></p></body></html>";
     return h;
 }
+static std::string genShortcuts() {
+    return "<html><head><title>Atajos de teclado</title></head><body><h1>Atajos de teclado</h1>"
+           "<h2>Navegacion</h2><ul>"
+           "<li>Ctrl+L / F6: barra de direcciones. Alt+Izquierda / Atras: pagina anterior. Alt+Derecha: siguiente. Alt+Inicio: pagina de inicio.</li>"
+           "<li>F5 / Ctrl+R: recargar. Ctrl+V: pegar y ir. Ctrl+C: copiar enlace seleccionado o la direccion.</li>"
+           "<li>Tab / Mayus+Tab: siguiente / anterior enlace o campo. Intro: abrir. Flechas, RePag, AvPag, Espacio, Inicio, Fin: desplazarse.</li></ul>"
+           "<h2>Pestanas</h2><ul>"
+           "<li>Ctrl+T: nueva. Ctrl+W: cerrar. Ctrl+Mayus+T: reabrir la cerrada. Ctrl+Tab / Ctrl+RePag: cambiar. Ctrl+1..8 / Ctrl+9: ir a la pestana / a la ultima.</li></ul>"
+           "<h2>Pagina</h2><ul>"
+           "<li>Ctrl+F: buscar en la pagina (Intro / F3: siguiente, Mayus+F3: anterior, Esc: cerrar). Ctrl++ / Ctrl+-: tamano del texto, Ctrl+0: restablecer.</li>"
+           "<li>Ctrl+D: marcador. Ctrl+J: descargas. Ctrl+H: historial. F8: videos de la pagina. F10: configuracion. F1: esta ayuda.</li>"
+           "<li>Clic derecho / Mayus+F10 / tecla Menu: menu contextual (copiar enlace, abrir en pestana nueva, descargar...).</li></ul>"
+           "<h2>Video</h2><ul>"
+           "<li>Espacio / K: pausa. Izquierda / Derecha: -10 / +10 s. J / L: -30 / +30 s. Arriba / Abajo: volumen. Inicio: al principio. H: calidad. I: estadisticas. Esc / Q: cerrar.</li></ul>"
+           "<h2>Diagnostico</h2><ul><li>F9: medir la velocidad de presentacion (benchmark).</li></ul>"
+           "<p><a href=\"about:home\">Inicio</a> | <a href=\"about:settings\">Configuracion</a></p></body></html>";
+}
+static std::string genHistory() {
+    std::string h = "<html><head><title>Historial</title></head><body><h1>Historial</h1>";
+    if (g_history.empty()) h += "<p>Todavia no hay paginas visitadas.</p>";
+    else {
+        h += "<p><a href=\"psb:clearhist\">[ borrar historial ]</a></p><ul>";
+        int shown = 0;
+        for (size_t i = g_history.size(); i-- > 0 && shown < 150; shown++)
+            h += "<li><a href=\"" + htmlEscape(g_history[i].first) + "\">" + htmlEscape(g_history[i].second.empty() ? g_history[i].first : g_history[i].second) + "</a></li>";
+        h += "</ul>";
+    }
+    h += "<p><a href=\"about:home\">Inicio</a> | <a href=\"about:bookmarks\">Marcadores</a></p></body></html>";
+    return h;
+}
+static std::vector<std::string> g_bench;  // resultados de la ultima medicion de presentacion
+static std::string genBench() {
+    std::string h = "<html><head><title>Velocidad de presentacion</title></head><body><h1>Velocidad de presentacion</h1>"
+                    "<p>Mide cuanto tarda SDL en poner un fotograma en pantalla segun lo que se copie. <a href=\"psb:bench\">[ ejecutar la medicion (~20 s) ]</a></p>";
+    if (g_bench.empty()) h += "<p>Aun no se ha medido.</p>";
+    else { h += "<ul>"; for (const std::string& l : g_bench) h += "<li>" + htmlEscape(l) + "</li>"; h += "</ul>"; }
+    h += "<p>Devuelve /data/psbrowser/log.txt (lineas [bench]) para decidir la mejora. <a href=\"about:settings\">Configuracion</a></p></body></html>";
+    return h;
+}
 static std::string genInternal(const std::string& url) {
+    if (url == "about:shortcuts") return genShortcuts();
+    if (url == "about:history") return genHistory();
+    if (url == "about:bench") return genBench();
     if (url == "about:videos") return genVideos();
     if (url == "about:settings") return genSettings();
     if (url == "about:bookmarks") return genBookmarks();
@@ -625,6 +726,7 @@ static void setPage(Browser& b, const std::string& url, std::string html, int ki
     b.html = std::move(html);
     b.kind = kind;
     layoutDoc(b);
+    if (kind == 0 && !isInternal(url) && urlIsHttp(url)) historyAdd(url, b.doc.title);
     if (kind == 0 && !g_skipCapture && !isInternal(url)) { captureImages(b); captureVideos(b.html, url); }
     b.scrollY = 0;
     b.scrollTarget = 0;
@@ -1121,6 +1223,8 @@ static bool startDownload(Browser& b, const std::string& url, bool thenPlay) {
     toast(err.size() > 90 ? err.substr(0, 90) : err, true);
     return true;
 }
+static void runBench();
+static bool g_vidFastPrev0 = false;  // pedir un repintado completo (bandas negras) en el siguiente fotograma de video
 static bool handleAction(Browser& b, const std::string& a) {
     bool cfg = true, relay = false;
     if (a == "sens-1") g_cfg.mouseSens -= 1.0f;
@@ -1145,6 +1249,12 @@ static bool handleAction(Browser& b, const std::string& a) {
     else if (a == "quit") { quitAsk(); return true; }
     else if (a == "vdec") g_cfg.vdec = g_cfg.vdec == 0 ? 2 : (g_cfg.vdec == 2 ? 3 : 0);
     else if (a == "vhalf") g_cfg.vhalf = !g_cfg.vhalf;
+    else if (a == "search") g_cfg.search = (g_cfg.search + 1) % 5;
+    else if (a == "ua") g_cfg.ua = (g_cfg.ua + 1) % 5;
+    else if (a == "clearhist") { g_history.clear(); historySave(); toast("Historial borrado"); }
+    else if (a == "vscale") g_cfg.vscale = (g_cfg.vscale + 1) % 3;
+    else if (a == "vpart") { g_cfg.vpart = !g_cfg.vpart; g_vidFastPrev0 = true; }
+    else if (a == "bench") { runBench(); navigate(b, "about:bench", true); return true; }
     else if (a == "vol-") g_cfg.volume -= 10;
     else if (a == "vol+") g_cfg.volume += 10;
     else if (a.compare(0, 5, "play:") == 0) {  // psb:play:<url> = ver sin descargar (streaming por rangos)
@@ -1329,7 +1439,7 @@ static std::string hostOf(const std::string& u) {
 static std::string tabTitle(const Browser& b) {
     if (!b.doc.title.empty()) return b.doc.title;
     if (b.url.empty() || b.url == "about:blank") return "Pestana nueva";
-    if (isInternal(b.url)) return b.url == "about:settings" ? "Configuracion" : (b.url == "about:bookmarks" ? "Marcadores" : "Inicio");
+    if (isInternal(b.url)) return b.url == "about:settings" ? "Configuracion" : (b.url == "about:bookmarks" ? "Marcadores" : (b.url == "about:history" ? "Historial" : (b.url == "about:shortcuts" ? "Atajos" : "Inicio")));
     return hostOf(b.url);
 }
 static void startUrlEdit(Browser& b, const std::string& initial, bool fresh) {
@@ -1384,12 +1494,76 @@ static void oskApply(Browser& b, OskResult r) {
         b.editField = -1;
     }
 }
+// ---- buscar en la pagina (Ctrl+F)
+struct FindState {
+    bool active = false;
+    std::string q, qLower;
+    std::vector<int> hits;  // indices de linea con coincidencia
+    int cur = -1;
+    unsigned gen = ~0u;     // docGen con el que se calcularon los hits
+    int genLines = -1;
+};
+static FindState g_find;
+static std::string asciiLower(const std::string& t) {
+    std::string o = t;
+    for (char& c : o) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + 32);
+    return o;
+}
+static void findRecompute(Browser& b, bool keepCur) {
+    g_find.qLower = asciiLower(g_find.q);
+    const int old = g_find.cur >= 0 && g_find.cur < static_cast<int>(g_find.hits.size()) ? g_find.hits[g_find.cur] : -1;
+    g_find.hits.clear();
+    g_find.cur = -1;
+    g_find.gen = b.docGen;
+    g_find.genLines = static_cast<int>(b.doc.lines.size());
+    if (g_find.qLower.empty()) return;
+    for (size_t li = 0; li < b.doc.lines.size(); li++) {
+        std::string t;
+        for (const Span& sp : b.doc.lines[li].spans) if (sp.kind == SK_TEXT) { t += sp.text; t += ' '; }
+        if (asciiLower(t).find(g_find.qLower) != std::string::npos) g_find.hits.push_back(static_cast<int>(li));
+    }
+    if (!g_find.hits.empty()) {
+        g_find.cur = 0;
+        if (keepCur && old >= 0)
+            for (size_t i = 0; i < g_find.hits.size(); i++) if (g_find.hits[i] >= old) { g_find.cur = static_cast<int>(i); break; }
+    }
+}
+static void findGoto(Browser& b, int idx) {
+    if (g_find.hits.empty()) return;
+    const int n = static_cast<int>(g_find.hits.size());
+    g_find.cur = ((idx % n) + n) % n;
+    const DocLine& L = b.doc.lines[g_find.hits[g_find.cur]];
+    scrollTo(b, std::max(0, std::min(maxScroll(b), L.y - VIEW_H / 3)), false);
+    g_dirty = true;
+}
+static void findStep(Browser& b, int dir) {
+    if (g_find.gen != b.docGen || g_find.genLines != static_cast<int>(b.doc.lines.size())) findRecompute(b, true);
+    findGoto(b, g_find.cur + dir);
+}
+static void findClose() { g_find.active = false; g_dirty = true; }
+static void drawFindBar(Canvas& cv, Browser& b) {
+    if (!g_find.active) return;
+    if (g_find.gen != b.docGen || g_find.genLines != static_cast<int>(b.doc.lines.size())) findRecompute(b, true);
+    const Theme& th = g_th;
+    const int bh = 44, by = H - bh;
+    cv.rect(0, by, W, bh, th.imgBg);
+    cv.rect(0, by, W, 1, th.rule);
+    std::string cnt = g_find.q.empty() ? "" : (g_find.hits.empty() ? "sin resultados" : std::to_string(g_find.cur + 1) + " de " + std::to_string(g_find.hits.size()));
+    te_draw(cv, 20, by + 29, "Buscar:", FONT_SANS, 18, true, th.text);
+    te_draw(cv, 100, by + 29, g_find.q + (g_caret ? "|" : ""), FONT_SANS, 18, false, th.text);
+    te_draw(cv, 700, by + 29, cnt, FONT_SANS, 16, false, g_find.hits.empty() && !g_find.q.empty() ? 0xFFE06060u : th.dim);
+    te_draw(cv, 1000, by + 29, "Intro/F3 siguiente - Mayus+F3 anterior - Esc cerrar", FONT_SANS, 14, false, th.dim);
+}
 static RenderCtx makeRc(Browser& b) {
     RenderCtx rc{&g_th, 0, VIEW_Y, W - SBAR_W, VIEW_H, contentLeft(), static_cast<int>(b.scrollY + 0.5f)};
     rc.focus = b.sel;
     rc.hover = b.hover;
     rc.editField = b.editField;
     rc.caretOn = g_caret;
+    if (g_find.active && !g_find.qLower.empty()) {
+        rc.find = &g_find.qLower;
+        rc.findLine = g_find.cur >= 0 && g_find.cur < static_cast<int>(g_find.hits.size()) ? g_find.hits[g_find.cur] : -1;
+    }
     return rc;
 }
 // ------------------------------------------------------------------ menu contextual (clic derecho / tecla Menu / boton 11 del mando)
@@ -1983,6 +2157,7 @@ static void drawFrame() {
     drawTabbar(cv, b);
     drawToolbar(cv, b);
     drawBubble(cv, b, SDL_GetTicks());
+    drawFindBar(cv, b);
     drawCtx(cv);
     if (g_dlp.active) drawDownload(cv);
     if (g_osk.open) osk_draw(g_osk, cv, th, W, H, g_caret);
@@ -1999,9 +2174,12 @@ static void renderFrame() {
 }
 // Via rapida de video (solo cuando no hay nada que dibujar encima: overlay oculto, sin mensajes ni avisos): el fotograma se sube como textura
 // a su tamano NATIVO (p. ej. 864x480 = 1,6 MB en vez de 8 MB) y SDL lo escala con RenderCopy; se evita componer 1920x1080 en CPU y subirlos.
+static SDL_Window* g_win = nullptr;
 static SDL_Texture* g_vidTex = nullptr;
 static int g_vidTexW = 0, g_vidTexH = 0;
 static unsigned long g_vidSerial = 0;
+static SDL_Rect g_vidDst = {0, 0, 0, 0};
+static bool g_partFailed = false;  // SDL_UpdateWindowSurfaceRects no funciona en este sistema
 static bool g_vidFastPrev = false;  // el ultimo frame presentado fue por la via rapida (las bandas negras ya estan pintadas)
 static void vidTexFree() {
     if (g_vidTex) { SDL_DestroyTexture(g_vidTex); g_vidTex = nullptr; }
@@ -2032,14 +2210,29 @@ static bool presentVideoFast(uint32_t* tUp, uint32_t* tPres) {
     int dw = W, dh = H;
     if (static_cast<int64_t>(W) * h > static_cast<int64_t>(H) * w) dw = static_cast<int>(static_cast<int64_t>(H) * w / h);
     else dh = static_cast<int>(static_cast<int64_t>(W) * h / w);
+    if (g_cfg.vscale == 1) { dw = w; dh = h; }                            // 1:1: copia directa, sin escalar por CPU
+    else if (g_cfg.vscale == 2 && w * 2 <= W && h * 2 <= H) { dw = w * 2; dh = h * 2; }  // x2 exacto si cabe
     const SDL_Rect dst = {(W - dw) / 2, (H - dh) / 2, dw, dh};
-    if (!g_vidFastPrev || g_mouseOk) { SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255); SDL_RenderClear(g_ren); }  // bandas negras (y borra el cursor)
+    // Actualizacion parcial: solo con la opcion activa, sin raton (el cursor se pinta fuera del rectangulo) y si el sistema la acepta.
+    const bool part = g_cfg.vpart && !g_mouseOk && g_win && !g_partFailed;
+    const bool fullRepaint = !g_vidFastPrev || g_mouseOk || g_vidFastPrev0 || g_vidDst.x != dst.x || g_vidDst.y != dst.y || g_vidDst.w != dst.w || g_vidDst.h != dst.h;
+    if (fullRepaint) { SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255); SDL_RenderClear(g_ren); }  // bandas negras (y borra el cursor)
     SDL_RenderCopy(g_ren, g_vidTex, nullptr, &dst);
     if (g_mouseOk && g_curTex) {
         SDL_Rect cd = {g_mx, g_my, 12 * 2, 17 * 2};
         SDL_RenderCopy(g_ren, g_curTex, nullptr, &cd);
     }
-    SDL_RenderPresent(g_ren);
+    if (part && !fullRepaint) {
+        if (SDL_UpdateWindowSurfaceRects(g_win, &dst, 1) != 0) {  // no soportado: volver a la presentacion normal para siempre
+            psb_log("[perfv] SDL_UpdateWindowSurfaceRects fallo (%s): se desactiva la actualizacion parcial", SDL_GetError());
+            g_partFailed = true;
+            SDL_RenderPresent(g_ren);
+        }
+    } else {
+        SDL_RenderPresent(g_ren);
+    }
+    g_vidFastPrev0 = false;
+    g_vidDst = dst;
     g_vidFastPrev = true;
     *tUp = b - a;
     *tPres = SDL_GetTicks() - b;
@@ -2049,6 +2242,63 @@ static void present() {
     drawFrame();
     SDL_UpdateTexture(g_tex, nullptr, g_cv->px.data(), W * 4);
     renderFrame();
+}
+
+// Benchmark de presentacion: mide ms/fotograma de SDL segun lo que se copie y que parte de la pantalla se actualice. Bloquea ~20 s.
+static void benchOne(const std::string& name, int n, const std::function<void()>& fn) {
+    fn();  // calentar
+    const uint32_t t0 = SDL_GetTicks();
+    for (int i = 0; i < n; i++) { fn(); SDL_PumpEvents(); }
+    const uint32_t dt = std::max<uint32_t>(1, SDL_GetTicks() - t0);
+    char l[260];
+    snprintf(l, sizeof(l), "%s: %.1f ms por fotograma (%.1f fps)", name.c_str(), dt / static_cast<double>(n), n * 1000.0 / dt);
+    g_bench.push_back(l);
+    psb_log("[bench] %s", l);
+}
+static void runBench() {
+    g_bench.clear();
+    toast("Midiendo presentacion (~20 s)...");
+    present();  // que se vea el aviso antes de bloquear
+    psb_log("[bench] inicio (ventana %dx%d, renderer software)", W, H);
+    const int N = 24;
+    const int vw = 864, vh = 480;
+    std::vector<uint32_t> px(static_cast<size_t>(vw) * vh);
+    for (int y = 0; y < vh; y++) for (int x = 0; x < vw; x++) px[static_cast<size_t>(y) * vw + x] = 0xFF000000u | ((x * 255 / vw) << 16) | ((y * 255 / vh) << 8) | 0x40;
+    SDL_Texture* t = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, vw, vh);
+    if (!t) { g_bench.push_back("no se pudo crear la textura de prueba"); return; }
+    SDL_UpdateTexture(t, nullptr, px.data(), vw * 4);
+    const SDL_Rect c11 = {(W - vw) / 2, (H - vh) / 2, vw, vh};
+    SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255);
+    benchOne("1. Solo Present (sin copiar nada)", N, [&] { SDL_RenderPresent(g_ren); });
+    benchOne("2. Limpiar a negro + Present", N, [&] { SDL_RenderClear(g_ren); SDL_RenderPresent(g_ren); });
+    benchOne("3. Copiar textura 1920x1080 + Present (lo que hace la interfaz)", N, [&] { SDL_RenderCopy(g_ren, g_tex, nullptr, nullptr); SDL_RenderPresent(g_ren); });
+    benchOne("4. Copiar 864x480 a 1:1 + Present", N, [&] { SDL_RenderCopy(g_ren, t, nullptr, &c11); SDL_RenderPresent(g_ren); });
+    {
+        int dw = W, dh = H;
+        if (static_cast<int64_t>(W) * vh > static_cast<int64_t>(H) * vw) dw = static_cast<int>(static_cast<int64_t>(H) * vw / vh); else dh = static_cast<int>(static_cast<int64_t>(W) * vh / vw);
+        const SDL_Rect fit = {(W - dw) / 2, (H - dh) / 2, dw, dh};
+        benchOne("5. Copiar 864x480 escalado a pantalla + Present (via rapida actual)", N, [&] { SDL_RenderCopy(g_ren, t, nullptr, &fit); SDL_RenderPresent(g_ren); });
+    }
+    SDL_Surface* surf = g_win ? SDL_GetWindowSurface(g_win) : nullptr;
+    if (!surf) {
+        const std::string m = std::string("SDL_GetWindowSurface no disponible: ") + SDL_GetError() + " (no se puede probar la actualizacion parcial)";
+        g_bench.push_back(m);
+        psb_log("[bench] %s", m.c_str());
+    } else {
+        const SDL_Rect rects[] = {{0, 0, 1, 1}, {0, 0, 480, 270}, {0, 0, 960, 540}, c11, {0, 0, W, H}};
+        for (const SDL_Rect& r : rects) {
+            int rc = 0;
+            char nm[120];
+            snprintf(nm, sizeof(nm), "6. Copia 1:1 + UpdateWindowSurfaceRects %dx%d", r.w, r.h);
+            benchOne(nm, N, [&] { SDL_RenderCopy(g_ren, t, nullptr, &c11); rc = SDL_UpdateWindowSurfaceRects(g_win, &r, 1); });
+            if (rc != 0) { const std::string m = std::string("   (devolvio error: ") + SDL_GetError() + ")"; g_bench.push_back(m); psb_log("[bench] %s", m.c_str()); }
+        }
+        benchOne("7. Copia 1:1 + SDL_UpdateWindowSurface (completa)", N, [&] { SDL_RenderCopy(g_ren, t, nullptr, &c11); SDL_UpdateWindowSurface(g_win); });
+    }
+    SDL_DestroyTexture(t);
+    g_bench.push_back("Fin. Si 6 con rectangulos pequenos es mucho mas rapido que 3, la actualizacion parcial merece la pena (Configuracion > Video).");
+    toast("Medicion terminada");
+    g_dirty = true;
 }
 static SDL_Texture* makeCursor(SDL_Renderer* ren) {
     static const char* bmp[17] = {"X           ", "XX          ", "XOX         ", "XOOX        ", "XOOOX       ", "XOOOOX      ",
@@ -2095,6 +2345,22 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
     }
     if (g_osk.open) {
         if (code == K_ESC) oskApply(b, OSK_CANCELLED);
+        return;
+    }
+    // 0) buscar en la pagina: la barra de busqueda se queda con el teclado
+    if (g_find.active) {
+        const bool shiftF = (mods & (ORBIS_KEYBOARD_MOD_LEFT_SHIFT | ORBIS_KEYBOARD_MOD_RIGHT_SHIFT)) != 0;
+        if (code == K_ESC) findClose();
+        else if (code == K_RETURN || code == K_F3) findStep(b, shiftF ? -1 : 1);
+        else if (code == K_BACKSPACE) { utf8_pop_back(g_find.q); findRecompute(b, false); findGoto(b, 0); }
+        else if (ctrl && code == K_V) { for (char x : g_clip) if (x != '\r' && x != '\n') g_find.q += x; findRecompute(b, false); findGoto(b, 0); }
+        else if (ctrl && code == K_F) g_dirty = true;
+        else if (ctrl) { findClose(); onKeyDown(code, ch, mods); }  // otros atajos (Ctrl+T, Ctrl+L...) cierran la busqueda y funcionan
+        else if (ch >= 32 && ch < 127) { g_find.q += static_cast<char>(ch); findRecompute(b, false); findGoto(b, 0); }
+        else if (code == K_UP) scrollBy(b, -64);
+        else if (code == K_DOWN) scrollBy(b, 64);
+        else if (code == K_PGUP) scrollBy(b, -VIEW_H * 9 / 10);
+        else if (code == K_PGDOWN) scrollBy(b, VIEW_H * 9 / 10);
         return;
     }
     // 1) edicion de la barra de direcciones
@@ -2178,6 +2444,8 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
                 else { Browser* t = newTab("about:blank", true); startUrlEdit(*t, "", false); }
                 return;
             case K_R: reload(b); return;
+            case K_F: g_find.active = true; g_find.gen = ~0u; g_find.q.clear(); g_find.qLower.clear(); g_find.hits.clear(); g_find.cur = -1; g_dirty = true; return;
+            case K_H: navigate(b, "about:history", true); return;
             case K_C: {  // copiar: el enlace seleccionado o, si no hay, la direccion de la pagina
                 std::string u = b.sel >= 0 ? focusTarget(b, b.sel) : std::string();
                 if (u.empty() && !isInternal(b.url)) u = b.url;
@@ -2203,6 +2471,9 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
         case K_F5: reload(b); return;
         case K_F10: if (shift) ctxOpenAtFocus(); else navigate(b, "about:settings", true); return;
         case K_F8: navigate(b, "about:videos", true); return;
+        case K_F1: navigate(b, "about:shortcuts", true); return;
+        case K_F3: if (!g_find.q.empty()) { g_find.active = true; findStep(b, shift ? -1 : 1); } return;
+        case K_F9: runBench(); navigate(b, "about:bench", true); return;
         case K_APP: ctxOpenAtFocus(); return;
         case K_BACKSPACE: goBack(b); return;
         case K_LEFT: if (alt) { goBack(b); return; } break;
@@ -2289,9 +2560,11 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.8.2 ==");
+    psb_log("== psbrowser v0.8.3 ==");
     configLoad();
     bookmarksLoad();
+    historyLoad();
+    clampCfg();  // aplica el buscador y el User-Agent guardados
     dlListLoad();
     g_th = g_cfg.dark ? themeDark() : themeLight();
     if (!te_init()) { psb_log("te_init FALLO (fuentes)"); return 1; }
@@ -2302,6 +2575,7 @@ int main(int, char**) {
         psb_log("SDL_InitSubSystem(%s) = %d %s", s.n, rc, rc ? SDL_GetError() : "ok");
     }
     SDL_Window* win = SDL_CreateWindow("psbrowser", 0, 0, W, H, 0);
+    g_win = win;
     g_ren = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE) : nullptr;
     if (!g_ren) { psb_log("sin renderer: %s", SDL_GetError()); return 1; }
     g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, W, H);

@@ -13,6 +13,8 @@ struct RenderCtx {
     int hover = -1;                  // elemento bajo el raton
     int editField = -1;              // campo en edicion
     bool caretOn = false;
+    const std::string* find = nullptr;  // texto buscado (Ctrl+F), en minusculas; nullptr/vacio = sin resaltado
+    int findLine = -1;                  // linea de la coincidencia actual (se resalta en naranja)
 };
 
 void drawDocument(Canvas& cv, const Document& d, const RenderCtx& rc);

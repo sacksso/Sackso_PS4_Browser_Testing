@@ -11,3 +11,6 @@ std::string urlPercentDecode(const std::string& s);                       // %XX
 // Si 'url' es un enlace de salida de DuckDuckGo (duckduckgo.com/l/?uddg=...), devuelve el destino real; si no, ''.
 std::string urlUnwrapSearchRedirect(const std::string& url);
 bool urlIsHttp(const std::string& url);                                    // empieza por http:// o https://
+// Motor de busqueda de la barra: 0 DuckDuckGo (HTML), 1 DuckDuckGo Lite, 2 Bing, 3 Google, 4 Startpage.
+extern int g_searchEngine;
+const char* urlSearchEngineName(int idx);

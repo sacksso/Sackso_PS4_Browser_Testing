@@ -116,3 +116,16 @@ Antes de nada: la **primera linea del log debe decir `== psbrowser v0.8.2 ==`** 
 3. Pausa, +-10 s, volumen y cerrar con O deben seguir funcionando; anota si hay parpadeos al cambiar entre las dos vias.
 4. Cierre (Salir de la app y menu de PS) y codigo CE si falla, como en v0.8.1.
 
+
+## Prueba v0.8.3: benchmark de presentacion y opciones de video (sin probar en PS4)
+La primera linea del log debe decir `== psbrowser v0.8.3 ==`.
+1. Con el navegador en una pagina normal, pulsa **F9** (o Configuracion > "Medir velocidad de presentacion"). Se bloquea ~20 s y muestra `about:bench`. Devuelve `log.txt` (lineas `[bench]`).
+2. Interpretacion: si la prueba 6 con rectangulos pequenos es mucho mas rapida que la 3, la actualizacion parcial sirve.
+3. Configuracion > Video: probar "Tamano del video" (ajustar / nativo 1:1 / x2) y "Actualizacion parcial" (solo sin raton conectado). Reproducir un video 20 s con cada combinacion y devolver el log (`[perfv] RAPIDO ... presentacion=`, `[vp] ... fps`).
+4. Si el video parpadea o se ve mal con la parcial, desactivarla; si `SDL_UpdateWindowSurfaceRects` falla se desactiva sola (linea `[perfv]`).
+
+### v0.8.3 pulido (sin probar en PS4)
+- Icono: debe verse un globo azul en el menu de la PS4 (si sigue el generico, mirar el paso "Compilar" del CI: "icono propio copiado").
+- Ctrl+F en una pagina larga: escribir, ver resaltado y contador "n de m"; Intro/F3 avanza; Esc cierra. F3 reabre la ultima busqueda.
+- Configuracion > Navegador: cambiar buscador (buscar texto en la barra) y User-Agent (recargar una pagina; probar un sitio de video con Chrome/Smart TV).
+- F1 (atajos), Ctrl+H (historial; reiniciar el navegador y comprobar que persiste), pagina que antes salia vacia por `<noscript>`.

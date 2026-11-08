@@ -4,6 +4,20 @@
 > Última actualización: 7 de noviembre de 2026, noche (**v0.8.2 = v0.8.1 + vía rápida de vídeo con textura nativa; sin probar en PS4**). El último log recibido es de **v0.8.0** (su primera línea dice `== psbrowser v0.8.0 ==`): v0.8.1 y v0.8.2 NO se han probado todavía. **JavaScript: aún no existe** (`docs/JS.md`).
 
 ---
+# >>> v0.8.3 (BENCHMARK + OPCIONES DE VIDEO) - SIN PROBAR EN PS4 - leer primero <<<
+> 7-nov-2026. Log v0.8.2 recibido (version confirmada). RESULTADOS: la via rapida SI funciona (`[perfv] RAPIDO`, subida=1 ms) pero `presentacion` = 51-63 ms FIJOS => ~14 fps (11 fps en la via lenta). Sync correcta (velocidad ~1.0x, 0 descartados, conversion 4.9 ms), cierre limpio (`[vp] cerrado limpio`). El cuello es `SDL_RenderCopy`(escalado)+`SDL_RenderPresent` a 1920x1080 con renderer SOFTWARE; la causa exacta NO esta confirmada.
+## Que anade v0.8.3
+- `runBench()` (F9, `psb:bench`, `about:bench`, logs `[bench]`): mide ms/fotograma de: Present solo, Clear+Present, copia 1920x1080, copia 864x480 1:1, copia escalada, `SDL_UpdateWindowSurfaceRects` con rectangulos 1x1/480x270/960x540/864x480/completo, `SDL_UpdateWindowSurface`.
+- Config `vscale` (0 ajustar, 1 nativo 1:1, 2 x2 si cabe) y `vpart` (experimental: solo actualiza el rectangulo del video; desactivado con raton conectado o si falla; `g_partFailed`).
+- **Pulido (misma v0.8.3, sin probar en PS4):** Ctrl+F busqueda en pagina (resalta amarillo/naranja, Intro/F3/Mayus+F3, barra inferior; solo teclado, sin OSK de mando), buscador configurable (`search`: DDG, DDG Lite, Bing, Google, Startpage; `url.cpp g_searchEngine`), User-Agent configurable (`ua`: PS4, Chrome, Firefox, Smart TV, Lynx; `g_netUserAgent` en netclient, se aplica por peticion), `about:shortcuts` (F1), `about:history` (Ctrl+H, persistente en `/data/psbrowser/history.txt`, max 300), contenido de `<noscript>` ahora visible (htmldoc), icono `assets/icon0.png` (512x512, el workflow lo copia a `sce_sys/icon0.png`; si el PKG falla por el icono, quitar ese paso).
+- Stubs SDL ampliados. Compila con `-fsyntax-only`; NO probado en consola.
+## Siguiente paso
+Pedir al usuario `log.txt` con las lineas `[bench]` y 20 s de video con cada opcion. Decidir segun resultados (ver PRUEBAS.md v0.8.3). Si todo el Present es fijo ~55 ms: alternativa = reducir resolucion de ventana/renderer o probar otro backend de SDL.
+## Lista de deseos del usuario (pendiente)
+Atajos y configuraciones tipo navegador de PC, mas compatibilidad (streaming/HLS, 4K sceAvPlayerStreamCount=0), mas calidad y fps de video, paginas con su diseno real (DOM/CSS/JS, ver docs/JS.md, servidor de render remoto), WebP/SVG/GIF, cookies, descargas multiconexion, Ctrl+F, User-Agent configurable.
+## Git (v0.8.3)
+`git add app assets tools/stubs .github/workflows/build-pkg.yml README.md docs && git commit -m "v0.8.3: benchmark de presentacion y opciones de video" && git push` (workflow sin cambios).
+
 # >>> ESTADO v0.8.2 (VIA RAPIDA DE VIDEO) - SIN PROBAR EN PS4 - leer primero <<<
 > 7-nov-2026 (noche, 2.º envío). El usuario dijo «el vídeo va mal incluso descargándolo primero» y subió `log_1.txt`, `logs__20_.zip` (CI), `video_frame0_1.bin`, etc. **Ese log es de v0.8.0** (línea 1: `== psbrowser v0.8.0 ==`; no hay líneas `[perfv]` ni `velocidad`): o no instaló v0.8.1, o el CI compiló el repo antiguo. **Pedirle que confirme que la primera línea del log diga v0.8.2.**
 

@@ -359,7 +359,7 @@ struct Builder {
 };
 
 bool isSkipTag(const std::string& n) {
-    return n == "script" || n == "style" || n == "noscript" || n == "svg" || n == "template" || n == "object" || n == "canvas" ||
+    return n == "script" || n == "style" || n == "svg" || n == "template" || n == "object" || n == "canvas" ||
            n == "audio" || n == "map" || n == "datalist" || n == "dialog";
 }
 bool isVoid(const std::string& n) {

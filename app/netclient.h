@@ -56,3 +56,6 @@ bool http_request(const std::string& url, const HttpPost* post, HttpResult& out,
 // Lee los bytes [start, start+len) de 'url' con 'Range'. true = respuesta 206 con Content-Range (o 200 si el archivo cabe en 'len').
 // out.body = datos, out.rangeTotal = tamano total. Si el servidor ignora Range y devuelve el archivo entero (200) mas grande que len -> false.
 bool http_range(const std::string& url, long long start, long long len, const std::string& referer, HttpResult& out, int maxRedirects = 5);
+
+// User-Agent de las peticiones (se lee en cada peticion, asi que cambia al instante).
+extern std::string g_netUserAgent;
