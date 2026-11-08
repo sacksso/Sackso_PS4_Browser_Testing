@@ -263,10 +263,12 @@ done:
     return ok;
 }
 
-bool http_request(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, int maxRedirects, HttpSink* sink,
-                  HttpGate gate, const HttpExtra* extra) {
-    static std::mutex httpMutex;  // libSceHttp se usa desde el hilo principal y el de imagenes: una peticion a la vez
-    std::lock_guard<std::mutex> httpLock(httpMutex);
+static std::mutex g_httpMutex;  // libSceHttp se usa desde el hilo principal y el de imagenes: una peticion a la vez
+HttpGateLock::HttpGateLock() { g_httpMutex.lock(); }
+HttpGateLock::~HttpGateLock() { g_httpMutex.unlock(); }
+
+bool http_request_nolock(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, int maxRedirects, HttpSink* sink,
+                         HttpGate gate, const HttpExtra* extra) {
     out = HttpResult();
     if (!g_ready) { out.stage = "net_init"; return false; }
     std::string cur = url;
@@ -290,6 +292,12 @@ bool http_request(const std::string& url, const HttpPost* post, HttpResult& out,
     }
     out.stage = "demasiadas redirecciones";
     return false;
+}
+
+bool http_request(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, int maxRedirects, HttpSink* sink,
+                  HttpGate gate, const HttpExtra* extra) {
+    std::lock_guard<std::mutex> httpLock(g_httpMutex);
+    return http_request_nolock(url, post, out, maxBody, maxRedirects, sink, gate, extra);
 }
 
 bool http_get(const std::string& url, HttpResult& out, size_t maxBody, int maxRedirects) {

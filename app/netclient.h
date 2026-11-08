@@ -53,6 +53,11 @@ bool http_get(const std::string& url, HttpResult& out, size_t maxBody = 1024 * 1
 // 'gate' (opcional): ver HttpGate.
 bool http_request(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody = 1024 * 1024, int maxRedirects = 5,
                   HttpSink* sink = nullptr, HttpGate gate = nullptr, const HttpExtra* extra = nullptr);
+// Descargas paralelas (v0.9.0): el que descarga toma el cerrojo de red UNA vez (HttpGateLock) y sus hilos llaman a
+// http_request_nolock (igual que http_request pero sin tomar el cerrojo). Mientras dura, el resto de peticiones espera (como antes).
+struct HttpGateLock { HttpGateLock(); ~HttpGateLock(); HttpGateLock(const HttpGateLock&) = delete; HttpGateLock& operator=(const HttpGateLock&) = delete; };
+bool http_request_nolock(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody = 1024 * 1024, int maxRedirects = 5,
+                         HttpSink* sink = nullptr, HttpGate gate = nullptr, const HttpExtra* extra = nullptr);
 // Lee los bytes [start, start+len) de 'url' con 'Range'. true = respuesta 206 con Content-Range (o 200 si el archivo cabe en 'len').
 // out.body = datos, out.rangeTotal = tamano total. Si el servidor ignora Range y devuelve el archivo entero (200) mas grande que len -> false.
 bool http_range(const std::string& url, long long start, long long len, const std::string& referer, HttpResult& out, int maxRedirects = 5);

@@ -52,3 +52,20 @@ g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -Iapp tools/tests/test
 ```
 `run_scanvideos.sh` ahora extrae desde `// Clasifica una URL de video` (incluye `vidScore`).
 
+
+# DOM + CSS lite + JavaScript (v0.9.0)
+`app/dom.cpp` (arbol, selectores, CSS lite) y `app/jsx.cpp` (QuickJS) se prueban en el PC con QuickJS real, sin SDL ni la consola:
+```
+git clone --depth 1 --branch v0.18.0 https://github.com/quickjs-ng/quickjs /tmp/qjs
+mkdir -p /tmp/qobj && for f in quickjs dtoa libregexp libunicode; do gcc -std=gnu11 -O1 -w -DNDEBUG -D__STDC_NO_ATOMICS__=1 -c /tmp/qjs/$f.c -o /tmp/qobj/$f.o; done
+g++ -std=c++17 -g -fsanitize=address,undefined -I/tmp/qjs -Iapp tools/tests/test_jsx.cpp app/jsx.cpp app/dom.cpp /tmp/qobj/*.o -lm -o /tmp/test_jsx && /tmp/test_jsx
+# sintaxis del resto (con stubs) y del modo sin motor:
+g++ -std=c++17 -fsyntax-only -Itools/stubs -Iapp app/main.cpp
+g++ -std=c++17 -fsyntax-only -DPSB_NO_JS -Iapp app/jsx.cpp
+```
+
+# Motor de descargas (v0.9.0)
+```
+g++ -std=c++17 -pthread -g -O1 -fsanitize=address,undefined -Itools/stubs -Iapp tools/tests/test_dlengine.cpp app/dlengine.cpp app/asyncwriter.cpp -o /tmp/test_dl && /tmp/test_dl
+g++ -std=c++17 -pthread -g -O1 -fsanitize=thread           -Itools/stubs -Iapp tools/tests/test_dlengine.cpp app/dlengine.cpp app/asyncwriter.cpp -o /tmp/test_dl_tsan && /tmp/test_dl_tsan
+```

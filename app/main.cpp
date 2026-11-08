@@ -33,6 +33,8 @@
 #include "canvas.h"
 #include "charset.h"
 #include "htmldoc.h"
+#include "jsx.h"
+#include "dlengine.h"
 #include "imgworker.h"
 #include "keyboard.h"  // copiado por el workflow desde samples/keyboard/keyboard/ de OpenOrbis
 #include "log.h"
@@ -93,6 +95,9 @@ struct Config {
     int search = 0;           // motor de busqueda de la barra (ver url.h)
     int ua = 0;               // User-Agent: 0 PS4, 1 Chrome, 2 Firefox, 3 Smart TV, 4 Lynx (paginas simples)
     bool vpart = false;       // EXPERIMENTAL: actualizar solo el rectangulo del video (SDL_UpdateWindowSurfaceRects) en vez de toda la pantalla
+    bool uipart = true;       // actualizar solo las zonas que cambian de la interfaz (el bench mostro que rellenar 1920x1080 cuesta ~33 ms)
+    int dlconn = 1;           // descargas: conexiones paralelas (1..6); 0 = motor antiguo (un solo flujo, sin reanudar)
+    int js = 2;               // 0 = maquetador original; 1 = DOM + CSS lite; 2 = DOM + CSS lite + JavaScript (QuickJS)
     int volume = 80;          // volumen por defecto del reproductor (0..100)
 };
 static Config g_cfg;
@@ -109,6 +114,8 @@ static void clampCfg() {
     if (g_cfg.vscale < 0 || g_cfg.vscale > 2) g_cfg.vscale = 0;
     if (g_cfg.search < 0 || g_cfg.search > 4) g_cfg.search = 0;
     if (g_cfg.ua < 0 || g_cfg.ua > 4) g_cfg.ua = 0;
+    if (g_cfg.js < 0 || g_cfg.js > 2) g_cfg.js = 2;
+    if (g_cfg.dlconn < 0 || g_cfg.dlconn > 8) g_cfg.dlconn = 1;
     g_searchEngine = g_cfg.search;
     static const char* kUA[] = {"Mozilla/5.0 (PlayStation 4; psbrowser/0.2)",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -120,9 +127,9 @@ static void clampCfg() {
 static void configSave() {
     FILE* f = fopen(kCfgPath, "w");
     if (!f) return;
-    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\nvscale=%d\nvpart=%d\nsearch=%d\nua=%d\n",
+    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\nvscale=%d\nvpart=%d\nsearch=%d\nua=%d\nuipart=%d\njs=%d\ndlconn=%d\n",
             g_cfg.mouseSens, g_cfg.mouseAccel ? 1 : 0, g_cfg.wheelInvert ? 1 : 0, g_cfg.wheelStep, g_cfg.home.c_str(), g_cfg.dark ? 1 : 0,
-            g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume, g_cfg.vscale, g_cfg.vpart ? 1 : 0, g_cfg.search, g_cfg.ua);
+            g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume, g_cfg.vscale, g_cfg.vpart ? 1 : 0, g_cfg.search, g_cfg.ua, g_cfg.uipart ? 1 : 0, g_cfg.js, g_cfg.dlconn);
     fclose(f);
 }
 static void configLoad() {
@@ -152,6 +159,9 @@ static void configLoad() {
         else if (k == "vpart") g_cfg.vpart = v == "1";
         else if (k == "search") g_cfg.search = atoi(v.c_str());
         else if (k == "ua") g_cfg.ua = atoi(v.c_str());
+        else if (k == "uipart") g_cfg.uipart = v == "1";
+        else if (k == "js") g_cfg.js = atoi(v.c_str());
+        else if (k == "dlconn") g_cfg.dlconn = atoi(v.c_str());
     }
     fclose(f);
     clampCfg();
@@ -499,6 +509,9 @@ static std::string genSettings() {
         "<p>Buscador de la barra: <a href=\"psb:search\">[ " + std::string(urlSearchEngineName(g_cfg.search)) + " ]</a></p>"
         "<p>Identificarse como (User-Agent): <a href=\"psb:ua\">[ " + kUaName[g_cfg.ua] + " ]</a> (se aplica a la siguiente pagina; "
         "algunas paginas de streaming y de video sirven mas contenido a Chrome/Smart TV, otras dan HTML mas simple a Lynx)</p>"
+        "<p>Paginas con DOM + CSS + JavaScript: <a href=\"psb:js\">[ " + std::string(g_cfg.js == 0 ? "no (maquetador original)" : (g_cfg.js == 1 ? "DOM + CSS lite" : "DOM + CSS + JavaScript")) + " ]</a> (motor: " + (jsx_has_engine() ? "QuickJS" : "no incluido") + "; se aplica a la siguiente pagina)</p>"
+        "<p>Descargas - conexiones paralelas: <a href=\"psb:dlconn\">[ " + std::string(g_cfg.dlconn == 0 ? "motor antiguo (1 flujo, sin reanudar)" : std::to_string(g_cfg.dlconn) + (g_cfg.dlconn == 1 ? " (reanudable)" : " (reanudable, paralelo)")) + " ]</a> <a href=\"about:dlbench\">[ Medir descargas (red y disco) ]</a></p>"
+        "<p>Interfaz: repintar solo lo que cambia: <a href=\"psb:uipart\">[ " + std::string(g_cfg.uipart ? "si" : "no") + " ]</a> (si ves parpadeos o restos en pantalla, desactivalo)</p>"
         "<p><a href=\"about:shortcuts\">[ Atajos de teclado (F1) ]</a> <a href=\"about:history\">[ Historial (Ctrl+H) ]</a></p>";
     const size_t e = out.rfind("</body>");
     out.insert(e == std::string::npos ? out.size() : e, extra);
@@ -536,6 +549,8 @@ struct DlProgress {  // descarga en primer plano
     uint32_t lastDraw = 0, lastSpeedT = 0, lastLog = 0, startT = 0;
     long long lastSpeedB = 0;
     long long queueKb = 0;  // datos en cola esperando al disco
+    int conns = 0, retries = 0;  // motor por trozos: conexiones activas y reintentos
+    bool resumed = false;
 };
 static DlProgress g_dlp;
 static std::vector<std::pair<std::string, std::string>> g_lastImgs;  // (URL absoluta, alt) de la ultima pagina web con imagenes
@@ -566,6 +581,7 @@ static void dlListLoad() {
     }
     fclose(f);
 }
+static std::string genDlBench();
 static std::string genDownloads() {
     std::string h = "<html><head><title>Descargas</title></head><body><h1>Descargas</h1><p>Los archivos se guardan en " + std::string(kDlDir) +
                     "/ de la consola.</p>";
@@ -579,7 +595,20 @@ static std::string genDownloads() {
                  " <a href=\"psb:deldl:" + std::to_string(i) + "\">[ borrar ]</a><br>" + htmlEscape(g_dls[i].url) + "</li>";
         h += "</ul>";
     }
-    h += "<p><a href=\"about:images\">Imagenes de la ultima pagina</a> | <a href=\"about:home\">Inicio</a> | <a href=\"about:settings\">Configuracion</a></p></body></html>";
+    {   // descargas cortadas (WiFi, cancelacion, cierre): se pueden continuar
+        std::vector<DlPartial> ps = dl_list_partials(kDlDir);
+        std::sort(ps.begin(), ps.end(), [](const DlPartial& x, const DlPartial& y) { return x.metaPath < y.metaPath; });
+        if (!ps.empty()) {
+            h += "<h2>Descargas incompletas</h2><ul>";
+            for (size_t i = 0; i < ps.size(); i++) {
+                const std::string nm = ps[i].finalPath.substr(ps[i].finalPath.find_last_of('/') + 1);
+                h += "<li><b>" + htmlEscape(nm) + "</b> - " + dl_format_size(ps[i].done) + " de " + dl_format_size(ps[i].total) + " <a href=\"psb:dlresume:" + std::to_string(i) +
+                     "\">[ continuar ]</a> <a href=\"psb:dldrop:" + std::to_string(i) + "\">[ borrar ]</a><br>" + htmlEscape(ps[i].url) + "</li>";
+            }
+            h += "</ul>";
+        }
+    }
+    h += "<p><a href=\"about:images\">Imagenes de la ultima pagina</a> | <a href=\"about:dlbench\">Medir descargas</a> | <a href=\"about:home\">Inicio</a> | <a href=\"about:settings\">Configuracion</a></p></body></html>";
     return h;
 }
 static std::string genImages() {
@@ -671,6 +700,7 @@ static std::string genInternal(const std::string& url) {
     if (url == "about:shortcuts") return genShortcuts();
     if (url == "about:history") return genHistory();
     if (url == "about:bench") return genBench();
+    if (url == "about:dlbench") return genDlBench();
     if (url == "about:videos") return genVideos();
     if (url == "about:settings") return genSettings();
     if (url == "about:bookmarks") return genBookmarks();
@@ -721,13 +751,33 @@ static void captureImages(const Browser& b) {
     g_lastImgs.swap(v);
     g_lastImgsPage = b.url;
 }
+static void jsxHostInit() {
+    JsHost h;
+    h.nowMs = [] { return static_cast<uint32_t>(SDL_GetTicks()); };
+    h.log = [](const std::string& l) { psb_log("%s", l.c_str()); };
+    h.resolve = [](const std::string& base, const std::string& ref) { return urlResolve(base, ref); };
+    h.userAgent = g_netUserAgent;
+    h.fetch = [](const std::string& url, size_t maxBody, std::string& body, std::string& fin, int& status, std::string& ct) {
+        HttpResult r;
+        if (!http_get(url, r, maxBody, 4)) { status = r.status; return false; }
+        body = std::move(r.body);
+        fin = r.finalUrl;
+        status = r.status;
+        ct = r.contentType;
+        return true;
+    };
+    jsx_set_host(h);
+}
+static std::string g_rawHtml;  // HTML original de la pagina que se esta cargando (antes de DOM/JS); los videos se buscan ahi (los scripts no se conservan)
 static void setPage(Browser& b, const std::string& url, std::string html, int kind) {
+    jsx_close(&b);
     b.url = url;
     b.html = std::move(html);
     b.kind = kind;
     layoutDoc(b);
     if (kind == 0 && !isInternal(url) && urlIsHttp(url)) historyAdd(url, b.doc.title);
-    if (kind == 0 && !g_skipCapture && !isInternal(url)) { captureImages(b); captureVideos(b.html, url); }
+    if (kind == 0 && !g_skipCapture && !isInternal(url)) { captureImages(b); captureVideos(g_rawHtml.empty() ? b.html : g_rawHtml, url); }
+    g_rawHtml.clear();
     b.scrollY = 0;
     b.scrollTarget = 0;
     g_dirty = true;
@@ -947,7 +997,7 @@ struct FileSink : HttpSink {
     }
 };
 // Descarga 'url' a /data/psbrowser/downloads/ (bloquea la interfaz con una barra de progreso). true = guardado.
-static bool runDownload(const std::string& url, std::string& err) {
+static bool runDownloadLegacy(const std::string& url, std::string& err) {
     imgw_cancel();
     imgw_pause(true);  // el hilo de imagenes no debe competir por la red
     g_dlp = DlProgress();
@@ -1016,6 +1066,312 @@ static bool runDownload(const std::string& url, std::string& err) {
     psb_log("[dl] ok: %s (%lld bytes)", sink.finalPath.c_str(), res.received);
     toast("Descargado: " + it.name + " (" + dl_format_size(it.bytes) + ")");
     return true;
+}
+
+// ------------------------------------------------------------------ motor de descargas por trozos (v0.9.0)
+static std::mutex g_pickMu;
+static std::string g_pickedName;  // nombre elegido por el motor (lo escribe un hilo de descarga, lo lee el bucle de la interfaz)
+static DlFetchFn makeNetFetch(const std::string& referer) {
+    return [referer](const std::string& url, long long start, long long end, DlChunkSink& cs, DlFetchResult& out) {
+        struct Ad : HttpSink {
+            DlChunkSink& c;
+            DlFetchResult& o;
+            Ad(DlChunkSink& c_, DlFetchResult& o_) : c(c_), o(o_) {}
+            bool begin(const HttpResult& r) override {
+                o.status = r.status; o.rangeTotal = r.rangeTotal; o.contentLength = r.contentLength;
+                o.finalUrl = r.finalUrl; o.contentType = r.contentType; o.contentDisposition = r.contentDisposition;
+                return c.begin(o);
+            }
+            bool write(const void* d, size_t n) override { return c.write(d, n); }
+        } ad(cs, out);
+        HttpExtra ex;
+        ex.rangeStart = start;
+        ex.rangeEnd = end;
+        ex.referer = referer;
+        HttpResult r;
+        const bool ok = http_request_nolock(url, nullptr, r, 0, 8, &ad, nullptr, &ex);
+        if (r.status) out.status = r.status;
+        out.stage = r.stage;
+        out.sceError = r.sceError;
+        if (!r.finalUrl.empty()) out.finalUrl = r.finalUrl;
+        return ok;
+    };
+}
+// Espera a que el motor termine mostrando el progreso; el boton O cancela. 'samples' = MB/s medidos cada segundo (medidor).
+static void dlWaitEngine(DlEngine& eng, std::vector<double>* samples) {
+    uint32_t lastSample = SDL_GetTicks();
+    long long lastB = eng.progress().done;
+    while (!eng.finished()) {
+        const DlProgress2 pr = eng.progress();
+        g_dlp.done = pr.done;
+        if (pr.total >= 0) g_dlp.total = pr.total;
+        g_dlp.queueKb = pr.queuedBytes / 1024;
+        g_dlp.conns = pr.activeConns;
+        g_dlp.retries = pr.retryCount;
+        g_dlp.resumed = pr.resumed;
+        {
+            std::lock_guard<std::mutex> lk(g_pickMu);
+            if (!g_pickedName.empty() && g_dlp.name == "archivo") g_dlp.name = g_pickedName;
+        }
+        const uint32_t now = SDL_GetTicks();
+        if (samples && now - lastSample >= 1000) {
+            samples->push_back((pr.done - lastB) * 1000.0 / (now - lastSample) / 1048576.0);
+            lastSample = now;
+            lastB = pr.done;
+        }
+        dlTick();
+        if (g_dlp.cancel) eng.cancel();
+        SDL_Delay(25);
+    }
+    eng.join();
+}
+static bool runDownloadEngine(const std::string& url, std::string& err) {
+    imgw_cancel();
+    imgw_pause(true);  // el hilo de imagenes no debe competir por la red
+    g_dlp = DlProgress();
+    g_dlp.active = true;
+    const bool same = g_pend.url == url;
+    g_dlp.name = same && !g_pend.name.empty() ? g_pend.name : "archivo";
+    g_dlp.total = same ? g_pend.len : -1;
+    g_dlp.lastSpeedT = SDL_GetTicks();
+    g_dlp.startT = g_dlp.lastSpeedT;
+    g_loading = true;
+    {
+        std::lock_guard<std::mutex> lk(g_pickMu);
+        g_pickedName.clear();
+    }
+    present();
+    mkdir(kDlDir, 0777);
+    DlParams p;
+    p.url = url;
+    p.dir = kDlDir;
+    p.knownTotal = same ? g_pend.len : -1;
+    p.conns = g_cfg.dlconn;
+    p.referer = same ? g_pendRef : std::string();
+    p.fetch = makeNetFetch(p.referer);
+    p.accept = [same](const DlFetchResult& r) {  // se esperaba un archivo y llega una pagina web: enlace temporal, sesion caducada, captcha...
+        return !(!g_pend.type.empty() && !dl_is_page_type(g_pend.type) && dl_is_page_type(r.contentType));
+    };
+    p.pickPath = [](const DlFetchResult& r) {
+        const std::string nm = dl_filename(r.finalUrl, r.contentDisposition, r.contentType);
+        const std::string fp = dl_unique_path(kDlDir, nm);
+        std::lock_guard<std::mutex> lk(g_pickMu);
+        g_pickedName = fp.substr(fp.find_last_of('/') + 1);
+        return fp;
+    };
+    p.log = [](const std::string& l) { psb_log("%s", l.c_str()); };
+    DlOutcome o;
+    DlProgress2 pr;
+    const uint32_t t0 = SDL_GetTicks();
+    {
+        HttpGateLock gate;  // toda la red para la descarga (los hilos del motor usan http_request_nolock)
+        DlEngine eng;
+        eng.start(p);
+        dlWaitEngine(eng, nullptr);
+        o = eng.outcome();
+        pr = eng.progress();
+    }
+    const uint32_t t1 = SDL_GetTicks();
+    g_dlp.active = false;
+    g_loading = false;
+    imgw_pause(false);
+    g_dirty = true;
+    if (o.bytes > 0)
+        psb_log("[dl] motor: %.1f s, %.2f MB/s de media, %d conexion(es), %d reintento(s)%s%s", (t1 - t0) / 1000.0, o.bytes * 1000.0 / std::max<uint32_t>(1, t1 - t0) / 1048576.0,
+                o.connsUsed, pr.retryCount, o.chunked ? ", por trozos" : ", flujo unico", pr.resumed ? ", reanudada" : "");
+    if (o.result == DlResult::OK) {
+        DlItem it;
+        it.name = o.name;
+        it.bytes = o.bytes;
+        it.url = o.finalUrl;
+        g_dls.push_back(it);
+        dlListSave();
+        psb_log("[dl] ok: %s (%lld bytes)", o.finalPath.c_str(), o.bytes);
+        toast("Descargado: " + it.name + " (" + dl_format_size(it.bytes) + ")");
+        return true;
+    }
+    char code[64];
+    snprintf(code, sizeof(code), "0x%08X", static_cast<unsigned>(o.sceError));
+    const std::string keepNote = o.kept ? " Lo descargado se conservo: vuelve a abrir el mismo enlace (o Descargas > Descargas incompletas) para continuar." : std::string();
+    switch (o.result) {
+        case DlResult::CANCELLED: err = "Descarga cancelada." + keepNote; break;
+        case DlResult::HTML_INSTEAD:
+            err = "El servidor devolvio una pagina web en vez del archivo: el enlace puede ser temporal, exigir iniciar sesion o una verificacion "
+                  "(captcha/Cloudflare) que este navegador no puede resolver.";
+            break;
+        case DlResult::BAD_STATUS:
+            err = "El servidor respondio HTTP " + std::to_string(o.status) + ".";
+            if (o.status == 403 || o.status == 429 || o.status == 503)
+                err += " Puede exigir verificacion (Cloudflare/captcha) o iniciar sesion; este navegador no resuelve captchas.";
+            break;
+        case DlResult::DISK_ERROR: err = "No se pudo escribir en el disco (sin espacio o sin permisos)." + keepNote; break;
+        default: err = "Error de red en '" + o.stage + "' (codigo " + code + ") tras varios reintentos." + keepNote; break;
+    }
+    psb_log("[dl] fallo: %s", err.c_str());
+    return false;
+}
+// Descarga 'url' a /data/psbrowser/downloads/ (bloquea la interfaz con una barra de progreso). true = guardado.
+static bool runDownload(const std::string& url, std::string& err) {
+    return g_cfg.dlconn <= 0 ? runDownloadLegacy(url, err) : runDownloadEngine(url, err);
+}
+
+// ------------------------------------------------------------------ medidor de descargas (about:dlbench)
+// Mide por separado la RED (1, 2 y 4 conexiones, sin guardar nada) y el DISCO (escritura secuencial e intercalada), para saber donde esta el limite
+// y cuantas conexiones paralelas compensan en tu WiFi. Resultados en la pagina y en log.txt ([dlbench]).
+static std::vector<std::string> g_dlBench;
+static int g_dlBenchRec = 0;
+static std::string g_dlBenchUrl;
+static const char* const kBenchUrls[] = {"https://speed.hetzner.de/100MB.bin", "http://ipv4.download.thinkbroadband.com/100MB.zip", "https://proof.ovh.net/files/100Mb.dat"};
+static void dlBenchLine(const std::string& l) {
+    g_dlBench.push_back(l);
+    psb_log("[dlbench] %s", l.c_str());
+}
+// Una prueba de red. true = hubo datos. avg en MB/s.
+static bool benchNet(const std::string& url, int conns, int ms, double& avg, bool& ranged) {
+    g_dlp.name = "Medidor de red: " + std::to_string(conns) + " conexion(es)";
+    g_dlp.done = 0; g_dlp.total = -1; g_dlp.speed = 0; g_dlp.conns = 0; g_dlp.retries = 0;
+    g_dlp.lastSpeedT = SDL_GetTicks(); g_dlp.lastSpeedB = 0; g_dlp.startT = g_dlp.lastSpeedT;
+    DlParams p;
+    p.url = url;
+    p.dir = kDlDir;
+    p.conns = conns;
+    p.chunk = 8LL << 20;
+    p.discard = true;
+    p.benchMs = ms;
+    p.resume = false;
+    p.fetch = makeNetFetch(std::string());
+    p.accept = [](const DlFetchResult& r) { return !dl_is_page_type(r.contentType); };
+    p.log = [](const std::string& l) { psb_log("%s", l.c_str()); };
+    std::vector<double> sm;
+    DlOutcome o;
+    DlProgress2 pr;
+    const uint32_t t0 = SDL_GetTicks();
+    {
+        HttpGateLock gate;
+        DlEngine eng;
+        eng.start(p);
+        dlWaitEngine(eng, &sm);
+        o = eng.outcome();
+        pr = eng.progress();
+    }
+    const uint32_t el = std::max<uint32_t>(1, SDL_GetTicks() - t0);
+    avg = o.bytes * 1000.0 / el / 1048576.0;
+    ranged = o.chunked;
+    char b[300];
+    if (g_dlp.cancel) { dlBenchLine("cancelado"); return false; }
+    if (o.result != DlResult::OK) {
+        snprintf(b, sizeof(b), "Red, %d conexion(es): fallo (%s HTTP %d, codigo 0x%08X)", conns, o.result == DlResult::HTML_INSTEAD ? "el servidor devolvio una pagina web" : o.stage.c_str(), o.status, static_cast<unsigned>(o.sceError));
+        dlBenchLine(b);
+        return false;
+    }
+    double mn = 1e9, mx = 0;
+    for (size_t i = sm.size() >= 3 ? 1 : 0; i < sm.size(); i++) { mn = std::min(mn, sm[i]); mx = std::max(mx, sm[i]); }
+    if (mn > mx) mn = mx = avg;
+    snprintf(b, sizeof(b), "Red, %d conexion(es): %.2f MB/s de media (por segundo: min %.1f, max %.1f), %d reintento(s)%s", conns, avg, mn, mx, pr.retryCount,
+             o.chunked ? "" : " - el servidor no admite Range: solo hay 1 flujo, este resultado no sirve para comparar");
+    dlBenchLine(b);
+    return o.bytes > 0;
+}
+static double benchDisk(bool interleaved) {
+    mkdir(kDlDir, 0777);
+    const std::string path = std::string(kDlDir) + "/.bench.tmp";
+    const long long MB = 1 << 20;
+    AsyncWriter w;
+    if (!w.openRW(path, true, 64 * MB, 24u * 1024 * 1024)) { dlBenchLine("Disco: no se pudo crear el archivo de prueba"); return 0; }
+    std::string blk(static_cast<size_t>(MB), 0);
+    for (size_t i = 0; i < blk.size(); i++) blk[i] = static_cast<char>((i * 2654435761u) >> 13);
+    g_dlp.name = interleaved ? "Medidor de disco: 4 flujos intercalados" : "Medidor de disco: secuencial";
+    g_dlp.done = 0; g_dlp.total = 64 * MB; g_dlp.speed = 0; g_dlp.conns = 0; g_dlp.retries = 0;
+    g_dlp.lastSpeedT = SDL_GetTicks(); g_dlp.lastSpeedB = 0; g_dlp.startT = g_dlp.lastSpeedT;
+    const uint32_t t0 = SDL_GetTicks();
+    bool ok = true;
+    for (int i = 0; i < 64 && ok; i++) {
+        const long long off = interleaved ? (static_cast<long long>(i % 4) * 16 + i / 4) * MB : static_cast<long long>(i) * MB;
+        ok = w.writeAt(off, blk.data(), blk.size());
+        g_dlp.done = static_cast<long long>(i + 1) * MB;
+        g_dlp.queueKb = w.queued() / 1024;
+        dlTick();
+        if (g_dlp.cancel) break;
+    }
+    if (ok && !g_dlp.cancel) ok = w.waitWritten(w.lastSeq());
+    w.finish();
+    remove(path.c_str());
+    const double sec = std::max<uint32_t>(1, SDL_GetTicks() - t0) / 1000.0;
+    if (!ok || g_dlp.cancel) { dlBenchLine(g_dlp.cancel ? "cancelado" : "Disco: error de escritura"); return 0; }
+    const double mbs = 64.0 / sec;
+    char b[200];
+    snprintf(b, sizeof(b), "Disco, 64 MB %s: %.1f MB/s (%.1f s, con vaciado a disco al final)", interleaved ? "en 4 flujos intercalados (como 4 conexiones)" : "secuenciales", mbs, sec);
+    dlBenchLine(b);
+    return mbs;
+}
+static void runDlBench(int which) {
+    g_dlBench.clear();
+    g_dlBenchRec = 0;
+    std::string url;
+    if (which == 0) url = g_pend.url;
+    else if (which >= 1 && which <= 3) url = kBenchUrls[which - 1];
+    g_dlBenchUrl = url;
+    if (url.empty() || !urlIsHttp(url)) { dlBenchLine("No hay URL para medir: abre antes un enlace de descarga (o elige un servidor de prueba)."); return; }
+    imgw_cancel();
+    imgw_pause(true);
+    g_dlp = DlProgress();
+    g_dlp.active = true;
+    g_loading = true;
+    toast("Midiendo descargas (~40 s). Cancelar: boton O");
+    present();
+    dlBenchLine("Servidor: " + url);
+    const int ns[3] = {1, 2, 4};
+    double avgs[3] = {0, 0, 0};
+    bool anyRange = true, okAll = true;
+    for (int i = 0; i < 3 && okAll; i++) {
+        bool ranged = true;
+        okAll = benchNet(url, ns[i], 8000, avgs[i], ranged);
+        if (i == 0 && okAll && !ranged) { anyRange = false; break; }  // sin Range no tiene sentido probar mas conexiones
+    }
+    double seq = 0, itl = 0;
+    if (!g_dlp.cancel) seq = benchDisk(false);
+    if (!g_dlp.cancel && seq > 0) itl = benchDisk(true);
+    if (!g_dlp.cancel) {
+        double best = 0;
+        for (double a : avgs) best = std::max(best, a);
+        if (best > 0 && anyRange) {
+            int rec = 1;
+            for (int i = 0; i < 3; i++) if (avgs[i] >= best * 0.9) { rec = ns[i]; break; }
+            if (avgs[0] > 0 && best < avgs[0] * 1.15) rec = 1;  // menos de un 15 % de mejora: no compensa
+            g_dlBenchRec = rec;
+            char b[260];
+            snprintf(b, sizeof(b), "Recomendacion: %d conexion(es) para descargas por ese servidor.", rec);
+            dlBenchLine(b);
+            if (seq > 0 && best > seq * 0.9) dlBenchLine("Aviso: el disco (escritura secuencial) rinde parecido a la red: puede ser el limite real a velocidades altas.");
+            if (itl > 0 && seq > 0 && itl < seq * 0.6) dlBenchLine("Aviso: con varios flujos intercalados el disco rinde bastante menos: las conexiones extra pueden no compensar en HDD.");
+        } else if (!anyRange) {
+            g_dlBenchRec = 1;
+            dlBenchLine("El servidor no admite Range: las descargas de ese servidor solo pueden usar 1 conexion (y no se pueden reanudar).");
+        }
+    }
+    g_dlp.active = false;
+    g_dlp.cancel = false;
+    g_loading = false;
+    imgw_pause(false);
+    g_dirty = true;
+}
+static std::string genDlBench() {
+    std::string h = "<html><head><title>Medir descargas</title></head><body><h1>Medir descargas</h1>"
+                    "<p>Mide por separado la <b>red</b> (1, 2 y 4 conexiones, sin guardar nada) y el <b>disco</b> (64 MB), para saber donde esta el limite y cuantas conexiones paralelas "
+                    "compensan en tu WiFi. Dura unos 40 s. Mide mejor con la PS4 en el sitio donde descargas.</p><p>Elegir servidor de prueba:</p><ul>";
+    if (!g_pend.url.empty() && urlIsHttp(g_pend.url)) h += "<li><a href=\"psb:dlbench:0\">[ Medir con la ultima descarga ]</a> " + htmlEscape(g_pend.url.substr(0, 90)) + "</li>";
+    for (int i = 0; i < 3; i++) h += "<li><a href=\"psb:dlbench:" + std::to_string(i + 1) + "\">[ Medir con " + htmlEscape(kBenchUrls[i]) + " ]</a></li>";
+    h += "</ul>";
+    if (g_dlBench.empty()) h += "<p>Aun no se ha medido.</p>";
+    else {
+        h += "<ul>";
+        for (const std::string& l : g_dlBench) h += "<li>" + htmlEscape(l) + "</li>";
+        h += "</ul>";
+        if (g_dlBenchRec > 0) h += "<p><a href=\"psb:dlconnset:" + std::to_string(g_dlBenchRec) + "\">[ Usar " + std::to_string(g_dlBenchRec) + " conexion(es) en las descargas ]</a></p>";
+    }
+    h += "<p>Ahora mismo: " + std::string(g_cfg.dlconn == 0 ? "motor antiguo" : std::to_string(g_cfg.dlconn) + " conexion(es)") +
+         ". Si la prueba falla con un servidor, prueba con otro. Devuelve /data/psbrowser/log.txt (lineas [dlbench] y [dleng]). <a href=\"about:downloads\">Descargas</a> | <a href=\"about:settings\">Configuracion</a></p></body></html>";
+    return h;
 }
 // Puerta de cabeceras de las paginas: lo que el visor no sabe mostrar (o que pide descargarse) no se lee, se ofrece guardar.
 static bool pageGate(const HttpResult& r) {
@@ -1104,7 +1460,19 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
         if (charset_to_utf8(res.body, cs)) psb_log("[charset] convertido a UTF-8 (declarado: '%s')", cs.c_str());
         else if (!cs.empty() && cs != "utf-8" && cs != "utf8") psb_log("[charset] '%s' sin soporte: se muestra tal cual", cs.c_str());
     }
-    if (ct.empty() || containsCI(ct, "html")) setPage(b, finalUrl, std::move(res.body), 0);
+    if (ct.empty() || containsCI(ct, "html")) {
+        if (g_cfg.js > 0) {
+            jsxHostInit();
+            JsxInfo ji;
+            g_rawHtml = res.body;
+            std::string processed = jsx_load(finalUrl, res.body, g_cfg.js >= 2, &ji);
+            setPage(b, finalUrl, std::move(processed), 0);
+            jsx_attach(&b);
+            toast(ji.jsRan ? ("JS: " + std::to_string(ji.scripts) + " scripts" + (ji.scriptErrors ? ", " + std::to_string(ji.scriptErrors) + " con error" : "") + " (" + std::to_string(ji.ms) + " ms)") : std::string("DOM + CSS (") + std::to_string(ji.ms) + " ms)");
+        } else {
+            setPage(b, finalUrl, std::move(res.body), 0);
+        }
+    }
     else if (containsCI(ct, "text/") || containsCI(ct, "json") || containsCI(ct, "xml")) setPage(b, finalUrl, std::move(res.body), 1);
     else {
         char info[220];
@@ -1224,7 +1592,9 @@ static bool startDownload(Browser& b, const std::string& url, bool thenPlay) {
     return true;
 }
 static void runBench();
+static void runDlBench(int which);
 static bool g_vidFastPrev0 = false;  // pedir un repintado completo (bandas negras) en el siguiente fotograma de video
+static bool g_uiForceFull = true;    // el siguiente fotograma de la interfaz se sube entero (actualizacion parcial)
 static bool handleAction(Browser& b, const std::string& a) {
     bool cfg = true, relay = false;
     if (a == "sens-1") g_cfg.mouseSens -= 1.0f;
@@ -1253,6 +1623,23 @@ static bool handleAction(Browser& b, const std::string& a) {
     else if (a == "ua") g_cfg.ua = (g_cfg.ua + 1) % 5;
     else if (a == "clearhist") { g_history.clear(); historySave(); toast("Historial borrado"); }
     else if (a == "vscale") g_cfg.vscale = (g_cfg.vscale + 1) % 3;
+    else if (a == "js") g_cfg.js = (g_cfg.js + 1) % 3;
+    else if (a == "dlconn") { static const int seq[] = {1, 2, 3, 4, 6, 0}; int i = 0; for (int k = 0; k < 6; k++) if (seq[k] == g_cfg.dlconn) i = k; g_cfg.dlconn = seq[(i + 1) % 6]; }
+    else if (a.compare(0, 10, "dlconnset:") == 0) { g_cfg.dlconn = std::max(0, std::min(8, atoi(a.c_str() + 10))); navigate(b, "about:dlbench", true); configSave(); return true; }
+    else if (a.compare(0, 8, "dlbench:") == 0) { runDlBench(atoi(a.c_str() + 8)); navigate(b, "about:dlbench", true); return true; }
+    else if (a.compare(0, 9, "dlresume:") == 0) {  // psb:dlresume:N = continuar una descarga incompleta
+        std::vector<DlPartial> ps = dl_list_partials(kDlDir);
+        std::sort(ps.begin(), ps.end(), [](const DlPartial& x, const DlPartial& y) { return x.metaPath < y.metaPath; });
+        const size_t i = static_cast<size_t>(atoi(a.c_str() + 9));
+        if (i < ps.size()) return startDownload(b, ps[i].url, false);
+        return true;
+    } else if (a.compare(0, 7, "dldrop:") == 0) {
+        std::vector<DlPartial> ps = dl_list_partials(kDlDir);
+        std::sort(ps.begin(), ps.end(), [](const DlPartial& x, const DlPartial& y) { return x.metaPath < y.metaPath; });
+        const size_t i = static_cast<size_t>(atoi(a.c_str() + 7));
+        if (i < ps.size()) dl_discard_partial(ps[i]);
+        cfg = false;
+    }    else if (a == "uipart") { g_cfg.uipart = !g_cfg.uipart; g_uiForceFull = true; }
     else if (a == "vpart") { g_cfg.vpart = !g_cfg.vpart; g_vidFastPrev0 = true; }
     else if (a == "bench") { runBench(); navigate(b, "about:bench", true); return true; }
     else if (a == "vol-") g_cfg.volume -= 10;
@@ -1936,6 +2323,9 @@ static void drawDownload(Canvas& cv) {
         st += "   -   " + dl_format_size(static_cast<long long>(g_dlp.speed)) + "/s";
         if (g_dlp.total > g_dlp.done) st += "   -   faltan " + fmtTime(static_cast<long long>((g_dlp.total - g_dlp.done) / g_dlp.speed));
     }
+    if (g_dlp.conns > 1) st += "   -   " + std::to_string(g_dlp.conns) + " conexiones";
+    if (g_dlp.retries > 0) st += "   -   " + std::to_string(g_dlp.retries) + " reintentos";
+    if (g_dlp.resumed) st += "   -   reanudada";
     te_draw(cv, px, py + ph + 40, te_fit(st, pw, FONT_SANS, 18, false), FONT_SANS, 18, false, th.text);
     te_draw(cv, px, by + bh - 26, "Cancelar: boton O (circulo) del mando", FONT_SANS, 16, false, th.dim);
 }
@@ -2180,6 +2570,16 @@ static int g_vidTexW = 0, g_vidTexH = 0;
 static unsigned long g_vidSerial = 0;
 static SDL_Rect g_vidDst = {0, 0, 0, 0};
 static bool g_partFailed = false;  // SDL_UpdateWindowSurfaceRects no funciona en este sistema
+static SDL_Rect g_vidCurLast = {0, 0, 0, 0};  // donde se dibujo el cursor en el ultimo fotograma de video
+static SDL_Rect clampScreen(SDL_Rect r) {
+    if (r.x < 0) { r.w += r.x; r.x = 0; }
+    if (r.y < 0) { r.h += r.y; r.y = 0; }
+    if (r.x + r.w > W) r.w = W - r.x;
+    if (r.y + r.h > H) r.h = H - r.y;
+    if (r.w < 0) r.w = 0;
+    if (r.h < 0) r.h = 0;
+    return r;
+}
 static bool g_vidFastPrev = false;  // el ultimo frame presentado fue por la via rapida (las bandas negras ya estan pintadas)
 static void vidTexFree() {
     if (g_vidTex) { SDL_DestroyTexture(g_vidTex); g_vidTex = nullptr; }
@@ -2214,16 +2614,25 @@ static bool presentVideoFast(uint32_t* tUp, uint32_t* tPres) {
     else if (g_cfg.vscale == 2 && w * 2 <= W && h * 2 <= H) { dw = w * 2; dh = h * 2; }  // x2 exacto si cabe
     const SDL_Rect dst = {(W - dw) / 2, (H - dh) / 2, dw, dh};
     // Actualizacion parcial: solo con la opcion activa, sin raton (el cursor se pinta fuera del rectangulo) y si el sistema la acepta.
-    const bool part = g_cfg.vpart && !g_mouseOk && g_win && !g_partFailed;
-    const bool fullRepaint = !g_vidFastPrev || g_mouseOk || g_vidFastPrev0 || g_vidDst.x != dst.x || g_vidDst.y != dst.y || g_vidDst.w != dst.w || g_vidDst.h != dst.h;
+    const bool part = g_cfg.vpart && g_win && !g_partFailed;
+    const bool fullRepaint = !g_vidFastPrev || (g_mouseOk && !part) || g_vidFastPrev0 || g_vidDst.x != dst.x || g_vidDst.y != dst.y || g_vidDst.w != dst.w || g_vidDst.h != dst.h;
     if (fullRepaint) { SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255); SDL_RenderClear(g_ren); }  // bandas negras (y borra el cursor)
+    SDL_Rect rects[3] = {dst, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    int nr = 1;
+    if (part && !fullRepaint && g_mouseOk && g_vidCurLast.w > 0) {  // el cursor anterior fuera del video se borra a negro (antes de pintar el video)
+        const SDL_Rect o = clampScreen(g_vidCurLast);
+        if (o.w > 0 && o.h > 0) { SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255); SDL_RenderFillRect(g_ren, &o); rects[nr++] = o; }
+    }
     SDL_RenderCopy(g_ren, g_vidTex, nullptr, &dst);
     if (g_mouseOk && g_curTex) {
         SDL_Rect cd = {g_mx, g_my, 12 * 2, 17 * 2};
         SDL_RenderCopy(g_ren, g_curTex, nullptr, &cd);
+        const SDL_Rect c2 = clampScreen(cd);
+        if (c2.w > 0 && c2.h > 0) rects[nr++] = c2;
+        g_vidCurLast = cd;
     }
     if (part && !fullRepaint) {
-        if (SDL_UpdateWindowSurfaceRects(g_win, &dst, 1) != 0) {  // no soportado: volver a la presentacion normal para siempre
+        if (SDL_UpdateWindowSurfaceRects(g_win, rects, nr) != 0) {  // no soportado: volver a la presentacion normal para siempre
             psb_log("[perfv] SDL_UpdateWindowSurfaceRects fallo (%s): se desactiva la actualizacion parcial", SDL_GetError());
             g_partFailed = true;
             SDL_RenderPresent(g_ren);
@@ -2238,10 +2647,78 @@ static bool presentVideoFast(uint32_t* tUp, uint32_t* tPres) {
     *tPres = SDL_GetTicks() - b;
     return true;
 }
+// Presentacion parcial de la interfaz (v0.9.0). El bench (F9) mostro que presentar es gratis (16,7 ms) y que lo caro es rellenar
+// 1920x1080 (~33 ms de mas): aqui se compara el lienzo con el fotograma anterior y solo se sube/copia el rectangulo que cambio.
+static std::vector<uint32_t> g_uiPrev;
+static bool g_uiPrevValid = false;
+static SDL_Rect g_uiLastCur = {0, 0, 0, 0};
+static uint32_t g_uiLastFull = 0;
+// true = presentado (o nada que presentar); false = hay que hacer una presentacion completa
+static bool presentUiPartial(const uint32_t* px) {
+    int top = -1, bot = -1, minx = W, maxx = -1;
+    for (int y = 0; y < H; y++) {
+        const uint32_t* a = px + static_cast<size_t>(y) * W;
+        const uint32_t* b = g_uiPrev.data() + static_cast<size_t>(y) * W;
+        if (memcmp(a, b, static_cast<size_t>(W) * 4) == 0) continue;
+        if (top < 0) top = y;
+        bot = y;
+        int x0 = 0, x1 = W - 1;
+        while (x0 < W && a[x0] == b[x0]) x0++;
+        while (x1 > x0 && a[x1] == b[x1]) x1--;
+        minx = std::min(minx, x0);
+        maxx = std::max(maxx, x1);
+    }
+    SDL_Rect rects[3];
+    int nr = 0;
+    if (top >= 0) {
+        const SDL_Rect r = {minx, top, maxx - minx + 1, bot - top + 1};
+        SDL_UpdateTexture(g_tex, &r, px + static_cast<size_t>(top) * W + minx, W * 4);
+        SDL_RenderCopy(g_ren, g_tex, &r, &r);
+        for (int y = r.y; y < r.y + r.h; y++) memcpy(g_uiPrev.data() + static_cast<size_t>(y) * W + r.x, px + static_cast<size_t>(y) * W + r.x, static_cast<size_t>(r.w) * 4);
+        rects[nr++] = r;
+    }
+    if (g_mouseOk && g_curTex) {
+        const SDL_Rect nc = {g_mx, g_my, 12 * 2, 17 * 2};
+        const bool moved = nc.x != g_uiLastCur.x || nc.y != g_uiLastCur.y;
+        if (g_uiLastCur.w > 0 && (moved || top >= 0)) {
+            const SDL_Rect o = clampScreen(g_uiLastCur);
+            if (o.w > 0 && o.h > 0) { SDL_RenderCopy(g_ren, g_tex, &o, &o); rects[nr++] = o; }  // restaura lo que tapaba el cursor
+        }
+        if (moved || top >= 0 || g_uiLastCur.w == 0) {
+            SDL_RenderCopy(g_ren, g_curTex, nullptr, &nc);
+            const SDL_Rect c2 = clampScreen(nc);
+            if (c2.w > 0 && c2.h > 0) rects[nr++] = c2;
+            g_uiLastCur = nc;
+        }
+    }
+    if (nr == 0) return true;  // nada cambio
+    if (SDL_UpdateWindowSurfaceRects(g_win, rects, nr) != 0) {
+        psb_log("[perfui] SDL_UpdateWindowSurfaceRects fallo (%s): se desactiva el repintado parcial", SDL_GetError());
+        g_partFailed = true;
+        return false;
+    }
+    return true;
+}
 static void present() {
     drawFrame();
-    SDL_UpdateTexture(g_tex, nullptr, g_cv->px.data(), W * 4);
+    const uint32_t* px = g_cv->px.data();
+    const bool usePart = g_cfg.uipart && g_win && !g_partFailed;
+    const uint32_t now = SDL_GetTicks();
+    if (usePart && g_uiPrevValid && !g_uiForceFull && !g_vidFastPrev && now - g_uiLastFull < 3000) {
+        if (presentUiPartial(px)) return;
+    }
+    SDL_UpdateTexture(g_tex, nullptr, px, W * 4);
     renderFrame();
+    if (usePart) {  // memoria del fotograma completo y del cursor, para las siguientes comparaciones
+        g_uiPrev.assign(px, px + static_cast<size_t>(W) * H);
+        g_uiPrevValid = true;
+        g_uiForceFull = false;
+        g_uiLastFull = now;
+        g_uiLastCur = g_mouseOk && g_curTex ? SDL_Rect{g_mx, g_my, 12 * 2, 17 * 2} : SDL_Rect{0, 0, 0, 0};
+    } else {
+        g_uiPrevValid = false;
+    }
+    g_vidFastPrev = false;
 }
 
 // Benchmark de presentacion: mide ms/fotograma de SDL segun lo que se copie y que parte de la pantalla se actualice. Bloquea ~20 s.
@@ -2560,7 +3037,8 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.8.3 ==");
+    psb_log("== psbrowser v0.9.0 (DOM+CSS+JS) ==");
+    psb_log("[jsx] motor JS: %s | js=%d uipart=%d", jsx_has_engine() ? "QuickJS" : "no incluido", g_cfg.js, g_cfg.uipart ? 1 : 0);
     configLoad();
     bookmarksLoad();
     historyLoad();
@@ -2800,6 +3278,10 @@ int main(int, char**) {
         }
         if (g_toastUntil && now > g_toastUntil) { g_toastUntil = 0; g_toast.clear(); g_dirty = true; }
         if (now - lastPump > 120) { lastPump = now; if (!g_vpMode) pumpImages(); }
+        if (!g_vpMode && jsx_active(&B) && !B.urlEdit && B.editField < 0 && !g_osk.open) {  // temporizadores, rAF y promesas de la pagina
+            std::string nh;
+            if (jsx_pump(&B, now, &nh)) { B.html = std::move(nh); relayout(B); }
+        }
         if (g_vpMode) {  // fotogramas nuevos, cambios de estado y reloj del overlay
             if (!vp_active()) { g_vpMode = false; vidTexFree(); imgw_pause(false); g_dirty = true; }
             else {

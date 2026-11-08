@@ -129,3 +129,12 @@ La primera linea del log debe decir `== psbrowser v0.8.3 ==`.
 - Ctrl+F en una pagina larga: escribir, ver resaltado y contador "n de m"; Intro/F3 avanza; Esc cierra. F3 reabre la ultima busqueda.
 - Configuracion > Navegador: cambiar buscador (buscar texto en la barra) y User-Agent (recargar una pagina; probar un sitio de video con Chrome/Smart TV).
 - F1 (atajos), Ctrl+H (historial; reiniciar el navegador y comprobar que persiste), pagina que antes salia vacia por `<noscript>`.
+
+
+## Prueba v0.9.0: presentacion parcial, DOM/CSS/JS, descargas por trozos y medidor (sin probar en PS4)
+1. Instalar y mirar la 1.ª linea del log: `== psbrowser v0.9.0 (DOM+CSS+JS) ==` y `[jsx] motor JS: QuickJS` (si dice «no incluido»: el build con JS fallo y cayo a `-DPSB_NO_JS`; devolver `logs/build_js_failed.log`).
+2. Configuracion: probar `js` = no / DOM+CSS / DOM+CSS+JS con la misma pagina; comparar. Log: `[jsx] DOM ok, N scripts…`, `[js] ERROR…`, `[css]`.
+3. Interfaz: desplazar una pagina larga y mover el cursor. Si hay restos o parpadeo: «Interfaz: repintar solo lo que cambia» = no. Log `[perfui]` si el repintado parcial falla.
+4. Video: `vscale=1` y `vpart=1`, con y sin raton (`[perfv]`, `[vp]`).
+5. Descargas en WiFi: `about:dlbench` con la ultima descarga (1 conexion primero; probar 2 y 4 solo si no se cuelga). Descargar un archivo grande, cortar el WiFi a mitad y volver a abrir el enlace (o Descargas > Descargas incompletas > continuar). Log: `[dlbench]`, `[dleng]`, `[dl] motor`.
+6. Devolver `/data/psbrowser/log.txt`, `config.txt`, `downloads.txt`, `last.html` y el zip `logs` del CI.
