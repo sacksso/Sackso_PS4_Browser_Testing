@@ -110,6 +110,8 @@ jobs:
           cp -r "$copia/SDL2/sce_sys" "$work/sce_sys"
           cp -r "$copia/SDL2/sce_module" "$work/sce_module"
           rm -f "$work/sce_sys/param.sfo"
+          # Icono propio del PKG (512x512); si falta, se queda el del sample.
+          if [ -f "$GITHUB_WORKSPACE/assets/icon0.png" ]; then cp "$GITHUB_WORKSPACE/assets/icon0.png" "$work/sce_sys/icon0.png"; echo "icono propio copiado"; fi
           cp "$GITHUB_WORKSPACE"/app/*.cpp "$GITHUB_WORKSPACE"/app/*.h "$work/$proj/"
           # Clase Keyboard del sample 'keyboard' (keyboard.h/.cpp), para leer el teclado USB con libSceKeyboard.
           cp "$copia"/keyboard/keyboard/keyboard.* "$work/$proj/"
