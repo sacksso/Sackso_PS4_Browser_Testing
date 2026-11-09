@@ -129,6 +129,58 @@ def netscape_line(c):
     return "%s%s\t%s\t%s\t%s\t%d\t%s\t%s" % (pre, dom, sub, c.get("path", "/") or "/", "TRUE" if c.get("secure") else "FALSE", exp, c.get("name", ""), c.get("value", ""))
 
 
+import ipaddress
+
+# Tipos que SI son un archivo para descargar (antes valia cualquier application/x-*: application/x-javascript daba falsas capturas).
+DOWNLOAD_TYPES = ("application/octet-stream", "binary/octet-stream", "application/zip", "application/x-zip-compressed",
+                  "application/x-7z-compressed", "application/x-rar-compressed", "application/vnd.rar", "application/x-rar",
+                  "application/x-msdownload", "application/x-bittorrent", "application/x-iso9660-image", "application/x-tar",
+                  "application/gzip", "application/x-gzip", "application/x-apple-diskimage", "application/vnd.sony.pkg",
+                  "application/x-ps4-pkg")
+
+
+def is_download_response(headers, url=""):
+    """True si la respuesta es una descarga de archivo. Funcion pura (se prueba sin navegador)."""
+    h = {k.lower(): v for k, v in headers.items()}
+    cd = h.get("content-disposition", "").lower()
+    ct = h.get("content-type", "").split(";")[0].strip().lower()
+    if "attachment" in cd:
+        return True
+    if ct in DOWNLOAD_TYPES:
+        return True
+    path = urllib.parse.urlparse(url).path.lower()
+    try:
+        size = int(h.get("content-length", "0") or 0)
+    except ValueError:
+        size = 0
+    return path.endswith(".pkg") and size > 1024 * 1024 and not ct.startswith("text/")
+
+
+def client_allowed(ip, allow, any_ip=False):
+    """Sin --allow solo se aceptan equipos de la red local (privados o loopback), nunca Internet."""
+    if allow:
+        return ip in allow
+    if any_ip:
+        return True
+    try:
+        a = ipaddress.ip_address(ip)
+        return a.is_private or a.is_loopback or a.is_link_local
+    except ValueError:
+        return False
+
+
+def filter_cookies(cookies, hosts):
+    """Solo las cookies de los sitios que se abrieron con /open (no todo el perfil del navegador). hosts=None: todas."""
+    if hosts is None:
+        return list(cookies)
+    out = []
+    for c in cookies:
+        d = c.get("domain", "").lstrip(".").lower()
+        if d and any(h == d or h.endswith("." + d) for h in hosts):
+            out.append(c)
+    return out
+
+
 def build_state(cookies, ua, downloads):
     """Texto que recibe la PS4. Funcion pura (se prueba sin navegador)."""
     out = []
@@ -153,6 +205,7 @@ class Backend:
     def __init__(self, args):
         self.args = args
         self.downloads = []
+        self.hosts = set()   # sitios abiertos con /open: solo sus cookies se entregan a la PS4
         self.ua = ""
         self.ctx = None
         self.pw = None
@@ -210,8 +263,14 @@ class Backend:
         try:
             h = {k.lower(): v for k, v in resp.headers.items()}
             cd = h.get("content-disposition", "")
-            ct = h.get("content-type", "")
-            if "attachment" in cd.lower() or ct.startswith("application/octet-stream") or ct.startswith("application/x-"):
+            try:
+                if resp.request.is_navigation_request():
+                    host = urllib.parse.urlparse(resp.url).hostname
+                    if host:
+                        self.hosts.add(host.lower())
+            except Exception:
+                pass
+            if is_download_response(resp.headers, resp.url):
                 name = ""
                 if "filename=" in cd:
                     name = cd.split("filename=", 1)[1].strip().strip('";')
@@ -221,7 +280,13 @@ class Backend:
 
     def open(self, url, auto=False):
         page = self.ctx.new_page()
-        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        h = urllib.parse.urlparse(url).hostname
+        if h:
+            self.hosts.add(h.lower())
+        try:
+            page.goto(url, wait_until="commit", timeout=15000)   # la PS4 no espera a que cargue toda la pagina
+        except Exception as e:  # noqa: BLE001
+            self.last_msg = "la pagina tarda en cargar (%s); sigue en el PC" % str(e).splitlines()[0][:80]
         page.bring_to_front()
         if auto:
             self.auto_pages[page] = {"t": 0.0, "n": 0}
@@ -267,7 +332,10 @@ class Backend:
         return True
 
     def state(self):
-        return build_state(self.ctx.cookies(), self.ua, self.downloads)
+        ck = self.ctx.cookies()
+        if not getattr(self.args, "all_cookies", False):
+            ck = filter_cookies(ck, self.hosts)
+        return build_state(ck, self.ua, self.downloads)
 
     def pump(self, ms):
         pages = self.ctx.pages
@@ -318,6 +386,8 @@ def main():
     ap.add_argument("--channel", default="", help="chrome | msedge: usar el navegador instalado en vez de Chromium")
     ap.add_argument("--profile", default="~/.psb_solver_profile", help="carpeta del perfil (las verificaciones resueltas se conservan entre usos)")
     ap.add_argument("--keep-downloads", action="store_true", help="no cancelar en el PC las descargas capturadas")
+    ap.add_argument("--allow-any", action="store_true", help="aceptar tambien equipos que no son de la red local (no recomendado)")
+    ap.add_argument("--all-cookies", action="store_true", help="entregar todas las cookies del perfil, no solo las de los sitios abiertos")
     ap.add_argument("--fake", action="store_true", help="sin navegador (prueba de conexion)")
     args = ap.parse_args()
 
@@ -347,7 +417,7 @@ def main():
             self.wfile.write(data)
 
         def do_GET(self):
-            if allow and self.client_address[0] not in allow:
+            if not client_allowed(self.client_address[0], allow, args.allow_any):
                 return self._send(403, "no permitido")
             u = urllib.parse.urlparse(self.path)
             q = urllib.parse.parse_qs(u.query)
@@ -378,7 +448,10 @@ def main():
     backend.start()
     print("psb_solver listo.  En la PS4, barra de direcciones:  !solver %s:%d" % (ip, args.port))
     if not allow:
-        print("Aviso: cualquiera de tu red puede pedir las cookies de este perfil. Usa --allow <IP de la PS4>.")
+        print("Aviso: cualquier equipo de tu red local puede pedir las cookies de los sitios que abras. Usa --allow <IP de la PS4>.")
+    print("Si la PS4 da 'tiempo agotado': abre el puerto en el firewall de Windows (PowerShell como administrador):")
+    print("  netsh advfirewall firewall add rule name=psb_solver dir=in action=allow protocol=TCP localport=%d" % args.port)
+    print("y prueba http://%s:%d/ping desde el navegador del PC." % (ip, args.port))
     try:
         while True:
             try:

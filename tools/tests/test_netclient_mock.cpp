@@ -97,5 +97,10 @@ int main() {
         HttpResult r; MemSink s; CHECK(http_request("https://a/404", nullptr, r, 0, 5, &s)); CHECK(r.status == 404); }
     { // 8) pagina grande sin sink sigue respetando maxBody
         HttpResult r; CHECK(http_request("https://a/file.zip", nullptr, r, 1000, 5)); CHECK(r.truncated); CHECK(r.body.size() == 1000); }
+    // v0.9.3: cabeceras que una pagina puede / no puede poner
+    if (http_header_forbidden("X-Requested-With") || http_header_forbidden("X-CSRF-Token") || http_header_forbidden("Authorization") || http_header_forbidden("Origin")) { printf("FALLO: cabecera permitida rechazada\n"); return 1; }
+    if (!http_header_forbidden("Host") || !http_header_forbidden("cookie") || !http_header_forbidden("Content-Length") || !http_header_forbidden("Content-Type") ||
+        !http_header_forbidden("Accept-Encoding") || !http_header_forbidden("Bad Name") || !http_header_forbidden("X\r\nY") || !http_header_forbidden("")) { printf("FALLO: cabecera prohibida aceptada\n"); return 1; }
+
     puts("netclient: todo ok"); return 0;
 }

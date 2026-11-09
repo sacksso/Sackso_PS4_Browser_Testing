@@ -31,3 +31,21 @@ try:
 finally:
     os.environ["PATH"] = os_path
 print("test_solver_media OK")
+
+# ---- v0.9.3: descargas, red local y cookies
+assert m.is_download_response({"Content-Type": "application/octet-stream"}, "http://a/x")
+assert m.is_download_response({"Content-Disposition": 'attachment; filename="a.pkg"'}, "http://a/x")
+assert m.is_download_response({"Content-Type": "application/zip"}, "http://a/x.zip")
+assert not m.is_download_response({"Content-Type": "application/x-javascript"}, "http://a/app.js")
+assert not m.is_download_response({"Content-Type": "application/x-www-form-urlencoded"}, "http://a/")
+assert not m.is_download_response({"Content-Type": "text/html"}, "http://a/index.html")
+assert m.is_download_response({"Content-Type": "application/foo", "Content-Length": "5000000"}, "http://a/game.pkg")
+assert not m.is_download_response({"Content-Type": "text/html", "Content-Length": "5000000"}, "http://a/game.pkg")
+assert m.client_allowed("192.168.1.50", set()) and m.client_allowed("10.0.0.2", set()) and m.client_allowed("127.0.0.1", set())
+assert not m.client_allowed("8.8.8.8", set()) and m.client_allowed("8.8.8.8", set(), True)
+assert m.client_allowed("1.2.3.4", {"1.2.3.4"}) and not m.client_allowed("192.168.1.5", {"1.2.3.4"})
+ck = [{"domain": ".vikingfile.com", "name": "a"}, {"domain": "google.com", "name": "b"}, {"domain": "cdn.x.net", "name": "c"}]
+assert [c["name"] for c in m.filter_cookies(ck, {"vikingfile.com", "www.cdn.x.net"})] == ["a", "c"]
+assert [c["name"] for c in m.filter_cookies(ck, {"cdn.x.net"})] == ["c"]
+assert len(m.filter_cookies(ck, None)) == 3 and m.filter_cookies(ck, set()) == []
+print("test_solver_v093 OK")

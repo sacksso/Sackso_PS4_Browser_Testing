@@ -1,8 +1,38 @@
 # Contexto del proyecto psbrowser (para continuar en otro chat o con otra IA)
 
-> Pega este documento al inicio de una conversación nueva junto con el zip del repo (y, si los tienes, el último `log.txt` y el zip `logs` del CI). Idioma de trabajo: **español**.
-> Última actualización: 9 de noviembre de 2026 (**v0.9.1 = correcciones del log + cookies + captchas en el PC, ver el primer bloque**; antes: v0.9.0 = presentación parcial + DOM/CSS lite/JavaScript (QuickJS) + motor de descargas por trozos + medidor de descargas; TODO sin probar en PS4**). El último log recibido es de **v0.8.3** (primera línea `== psbrowser v0.8.3 ==`). Las secciones numeradas §1–§11 y los bloques v0.8.x de más abajo son **históricos**: donde digan «sin JavaScript», «sin DOM/CSS» o «descargas de un solo flujo» ya no es cierto (ver el bloque v0.9.0). `docs/JS.md` es el plan original de JS (histórico); lo vigente está en `docs/V0.9.0.md`.
+> Pega este documento al inicio de una conversación nueva junto con el zip del repo, `PLAN_MAESTRO.md` (si lo tienes) y el último `log.txt` y zip `logs` del CI. Idioma de trabajo: **español**.
+> Última actualización: 9 de noviembre de 2026 (**v0.9.5, tandas 1 y 2: sondeo SDL/GPU + opción `gpu` + Canvas 2D + modo juego**). Versiones v0.9.0–v0.9.5: **ninguna probada aún en PS4 salvo el log de v0.9.0/0.9.1 ya analizado**; v0.9.3 y v0.9.4 no se han compilado en el CI ni probado. El último log recibido es de v0.9.1. Las secciones numeradas §1–§11 y los bloques v0.8.x de más abajo son **históricos**: donde digan «sin JavaScript», «sin DOM/CSS» o «descargas de un solo flujo» ya no es cierto. Lo vigente por versión está en `docs/V0.9.x.md`; el plan por fases en `PLAN_MAESTRO.md`.
 
+# >>> v0.9.5 (SONDEO SDL/GPU + CANVAS 2D + MODO JUEGO) - SIN PROBAR EN PS4 - leer primero <<<
+> 9-nov-2026. Detalle en `docs/V0.9.5.md`. El usuario decidió **no probar v0.9.4 y saltar a v0.9.5** para testear a fondo (se le avisó de que apilar versiones sin probar dificulta el diagnóstico; el CI puede fallar por varias versiones a la vez: pedir `build.log`). Objetivo declarado: aprovechar al máximo la potencia general y de render, y más compatibilidad (más webs, juegos y utilidades web, ports a navegador).
+## Qué hay (primera tanda)
+- Sondeo de lo que ofrece SDL: CI `probe_sdl` → `logs/sdl_probe.txt`; en consola líneas `[gpu]` en `log.txt` y sección en `about:bench`.
+- Config `gpu` (0 = software, por defecto; 1 = intentar renderer ACELERADO solo si SDL declara uno). Ajustes → Renderizado (`psb:gpu`, se aplica al reiniciar). Protección: `/data/psbrowser/gpu_try.txt`; si la app cierra antes de 30 s con gpu=1, el siguiente arranque vuelve a `gpu=0`. Con renderer acelerado `g_partFailed = true` (sin `UpdateWindowSurfaceRects`).
+## Qué pedir al usuario tras instalar
+1. Zip `logs` del CI: `sdl_probe.txt` (¿trae backends distintos de software? ¿algo de GNM?) y `build.log` si falla (puede fallar por v0.9.3/0.9.4, no solo 0.9.5).
+2. `log.txt`: primera línea `== psbrowser v0.9.5 ...`, todas las líneas `[gpu]`, `[net] listo`, `[jsx]`. Luego repetir con `gpu=1` (dejar 30 s abierto) y devolver `[gpu]` + `about:bench` (F9).
+3. Lo pendiente de v0.9.4 (Paso 0 del PLAN_MAESTRO): firewall 8765, `/ping`, un sitio sin captcha y uno con captcha, `vscale` 3/4 con fps.
+## Tanda 2 (hecha, sin probar): Canvas 2D + modo juego (detalle completo y limitaciones en `docs/V0.9.5.md`)
+- `app/canvas2d.cpp/.h`: rasterizador propio (sin SDL/QuickJS; probado en PC: `tools/tests/test_canvas2d.cpp`). `app/jsx.cpp`: natives `__c.*` (create, resize, op, str, image, getPixels, putPixels) bajo `#ifndef PSB_NO_CANVAS`, `jsx_eval()`, `jsx_set_game_mode()`. `app/jsprelude.h`: bloque "Canvas 2D (v0.9.5)" (Ctx2D, CanvasGradient, ImageData, Image con `src`, eventos de entrada `__psbKey/__psbMouse/__psbPad`) y **`requestAnimationFrame` ahora pasa la marca de tiempo**. `app/imgworker.cpp`: `imgw_decode_native()`. `app/main.cpp`: modo juego (F2 / menú contextual; `gameEnter/gameExit/gameEvent/gameKeys/gameMouse/gameTick/gamePresent`), ajuste `gscale`, `host.decodeImage`.
+- **Los opcodes de `C2dOp`/`C2dStr` (canvas2d.h) deben coincidir con `O`/`S` del prelude**: lo comprueba `tools/tests/test_canvas_prelude.js`; si se añade un opcode, tocar los dos y correr el test.
+- CI: tres niveles de compilación: con JS+Canvas -> con JS sin Canvas (`-DPSB_NO_CANVAS`, `logs/canvas_fallback.txt`) -> sin JS (`-DPSB_NO_JS`, `logs/js_fallback.txt`). Si falla `canvas2d.cpp`/`main.cpp`/`imgworker.cpp` (C++ puro, sin interruptor) fallan los tres: pedir `build.log`.
+- Verificación de sintaxis sin QuickJS: `g++ -std=c++17 -fsyntax-only -Itools/stubs_qjs -Itools/stubs -Iapp app/jsx.cpp` (el stub de `quickjs.h` es mínimo, no la API real).
+- **Sin verificar**: enlace QuickJS<->canvas (`tools/tests/test_jsx_canvas.cpp` lo prueba con QuickJS real), mapa del mando (suposición), velocidad en el Jaguar, decodificación de stb en consola.
+- Página de prueba: `docs/canvas_test.html` (alojarla en un servidor; GitHub Pages sirve).
+## Qué pedir al usuario tras la tanda 2
+`logs.zip` del CI (¿`canvas_fallback.txt`/`js_fallback.txt`?), `log.txt` con `[game]` (botones/ejes reales, textura, modo) y `[canvas]` (descargas de imágenes), resultado de `canvas_test.html` (lista OK/FALLA) y fps que dice la página en modo juego con `gscale` 1:1 y ajustado.
+## Siguiente (tanda 3, no hecha)
+Audio (`HTMLAudioElement` real / WebAudio mínimo), `Path2D`, texto con las fuentes del motor de texto, rueda/táctil hacia la página, optimizar con datos reales; decidir con el sondeo GPU si hay camino por GNM. WebGL/WASM no son realistas con QuickJS sin JIT.
+## Git (v0.9.5)
+Cambiados/nuevos: `app/main.cpp`, `app/jsx.cpp/.h`, `app/jsprelude.h`, `app/imgworker.cpp/.h`, `app/canvas2d.cpp/.h` (nuevos), `tools/stubs/SDL2/SDL.h`, `tools/stubs_qjs/quickjs.h` (nuevo), `tools/tests/test_canvas2d.cpp`, `test_canvas_prelude.js`, `test_jsx_canvas.cpp` (nuevos), `.github/workflows/build-pkg.yml` (**SÍ cambia**), `docs/*` (incl. `canvas_test.html`), `PLAN_MAESTRO.md`.
+```bash
+cd Sackso_PS4_Browser_Testing-main
+git add -A app docs tools third_party .github README.md PLAN_MAESTRO.md
+git commit -m "v0.9.5: sondeo SDL/GPU, Canvas 2D y modo juego"
+git push
+```
+Después: Actions → **Build PKG** → *Run workflow* (`probe_sdl` y `js_engine` marcados) → instalar → probar.
+---
 # >>> v0.9.2 (CAPTCHAS/DESCARGAS DINAMICAS + !media + VIDEO) - SIN PROBAR EN PS4 - leer primero <<<
 > 9-nov-2026. Detalle y tabla log->causa->cambio en `docs/V0.9.2.md`. Log recibido: v0.9.1. Cambios: compareDocumentPosition/initEvent/template.content en el prelude, POST en fetch/XHR (`JsHost::request`), presupuesto de carga solo CPU, ayudante PC protocolo 2 (`auto=1`, `/media`, `/status`), comando `!media`, `vscale` 3/4, log `[perfv] via LENTA`. Pendiente: confirmar con log que jQuery ya no falla, que mocha/akirabox hacen POST, que el ayudante conecta (0x80431068 antes), y por que la via rapida de video no se usaba. Sin soporte aun: modulos ES, Turnstile en PS4, HLS verificado, layout flex.
 ---
@@ -392,3 +422,12 @@ Después: Actions → **Build PKG** → *Run workflow* (deja `probe_js` marcado)
 
 ## 11. Prompt sugerido para una IA nueva
 "[ESTADO ACTUAL: lee primero el bloque >>> v0.9.0 <<< de docs/CONTEXTO.md y luego «RESULTADOS v0.8.0» (vídeo con AvPlayer). v0.9.0 añade presentación parcial, DOM/CSS lite/JavaScript (QuickJS), motor de descargas por trozos reanudable y el medidor about:dlbench; NADA está probado en mi PS4 todavía. Mi prioridad es descargar archivos pesados por WiFi.] Continúa el proyecto psbrowser (navegador homebrew para PS4, OpenOrbis). Lee `docs/CONTEXTO.md` del zip adjunto y pídeme el zip del repo si no lo he subido. Lo primero es verificar v0.8.1 con mi `log.txt` (líneas `[vp] … velocidad`, `[perfv]`, `[quit]`) y mi `config.txt`. Después, según el roadmap: presentación de vídeo más barata, duración en la lista F8, HLS, servidor de renderizado remoto, **JavaScript** (`docs/JS.md`), cookies, WebP/SVG/GIF. Responde en español, sé honesto sobre lo no probado o no compilado, pídeme `log.txt` antes de tocar mapeos de entrada, dame los comandos `git` exactos si cambias archivos y entrégame cada vez un `CONTEXTO.md` actualizado."
+
+
+## 12. v0.9.3 (leer primero; ver docs/V0.9.3.md)
+Estado: **sin probar en PS4**. Cambios: timeouts cortos y hosts muertos en carga de páginas; cabeceras/Referer/Origin en fetch y XHR; detección inmediata de formatos de vídeo no soportados (`app/vsniff.h`); tecla S / botón "Tam" / botón 2 del mando cambian el tamaño de imagen del vídeo (`vscale` por defecto 3 con migración `cfgv=2`); alto contraste y tamaño de cursor (Ajustes → Accesibilidad); avisos más largos; `psb_solver.py` más estricto (tipos de descarga, solo red local, cookies filtradas, `/open` no bloquea).
+Hallazgos del log v0.9.1: `0x80431068` = timeout (suposición); WebM no se reproduce (AvPlayer); pkg-zone.com usa módulos ES.
+Pendiente principal: soporte de `type=module` en QuickJS; verificar en PS4 mocha/akirabox/vikingfile (este último solo con el ayudante del PC y el firewall abierto).
+
+## 13. v0.9.4 (ver docs/V0.9.4.md)
+Sin probar en PS4. Prelude con stubs de WebSocket/EventSource/indexedDB/Intl/FileReader/BroadcastChannel/postMessage/XMLSerializer/etc. (test: `node tools/tests/test_prelude_stubs.js`), clase `Request`, páginas de error con causa legible y "Reintentar" (`app/neterr.h`). Pendiente principal sin cambios: módulos ES, iframes, descargas (reposo/cola/página), app Android. Lista completa en PENDIENTE.md.

@@ -138,3 +138,15 @@ La primera linea del log debe decir `== psbrowser v0.8.3 ==`.
 4. Video: `vscale=1` y `vpart=1`, con y sin raton (`[perfv]`, `[vp]`).
 5. Descargas en WiFi: `about:dlbench` con la ultima descarga (1 conexion primero; probar 2 y 4 solo si no se cuelga). Descargar un archivo grande, cortar el WiFi a mitad y volver a abrir el enlace (o Descargas > Descargas incompletas > continuar). Log: `[dlbench]`, `[dleng]`, `[dl] motor`.
 6. Devolver `/data/psbrowser/log.txt`, `config.txt`, `downloads.txt`, `last.html` y el zip `logs` del CI.
+
+## Prueba v0.9.5 (sondeo SDL/GPU)
+1. CI: ejecutar con `probe_sdl` marcado y bajar el zip `logs`: `sdl_probe.txt` dice qué backends trae el SDL del toolchain.
+2. Instalar, abrir 30 s y cerrar. En `log.txt` buscar `[gpu]`: controladores de video/render y `renderer en uso`.
+3. Ajustes → Renderizado → activar GPU, reiniciar, dejar 30 s. Buscar `[gpu] intentando`, `renderer ACELERADO activo ... ms por fotograma` o `no declara ningun renderer acelerado`, y `prueba de 30 s superada`.
+4. F9 (`about:bench`) con y sin GPU; devolver ambos logs. Si la pantalla sale negra: cerrar y reabrir (vuelve sola a software).
+
+## Prueba v0.9.5 tanda 2 (Canvas 2D y modo juego)
+1. CI: comprobar que NO aparecen `logs/canvas_fallback.txt` ni `logs/js_fallback.txt` (si aparecen, mandar `build_canvas_failed.log`).
+2. Subir `docs/canvas_test.html` a un servidor (p. ej. GitHub Pages) y abrirlo: debe listar OK en todas las pruebas ("Todas las pruebas pasaron"). Mandar la lista si hay FALLA.
+3. F2 (modo juego): se ve el canvas; mover el cuadrado con flechas/WASD, cruceta o stick; clic de ratón lo teletransporta. Salir con F2 o Options 1 s. Mandar los `[game]` del `log.txt` (botones/ejes reales) y el fps que dice la pagina.
+4. Probar un juego web sencillo con canvas 2D (p. ej. un Snake, Pong o Tetris simple; Hextris es otro candidato; ninguno probado por mi) y contar que falla.
