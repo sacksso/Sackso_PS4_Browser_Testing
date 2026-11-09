@@ -22,6 +22,13 @@ class Event {
   stopImmediatePropagation() { this.__stop = true; this.__stopImm = true; }
   get cancelBubble() { return this.__stop; }
   composedPath() { return []; }
+  initEvent(t, b, c) { this.type = String(t); this.bubbles = !!b; this.cancelable = !!c; }
+  initCustomEvent(t, b, c, d) { this.initEvent(t, b, c); this.detail = d === undefined ? null : d; }
+  initUIEvent(t, b, c) { this.initEvent(t, b, c); }
+  initMouseEvent(t, b, c) { this.initEvent(t, b, c); }
+  initKeyboardEvent(t, b, c) { this.initEvent(t, b, c); }
+  get returnValue() { return !this.defaultPrevented; } set returnValue(v) { if (!v) this.preventDefault(); }
+  get srcElement() { return this.target; } get eventPhase() { return 2; } get composed() { return false; }
 }
 class CustomEvent extends Event { constructor(t, i) { super(t, i); this.detail = i && i.detail !== undefined ? i.detail : null; } }
 class UIEvent extends Event {}
@@ -132,7 +139,27 @@ class Node extends EventTarget {
   replaceChildren(...a) { D.setText(this.__id, ''); this.append(...a); }
   isEqualNode(o) { return this === o; }
   isSameNode(o) { return this === o; }
+  compareDocumentPosition(o) {
+    if (this === o) return 0;
+    if (!o) return 1;
+    if (this.contains(o)) return 20;   // CONTAINED_BY | FOLLOWING
+    if (o.contains(this)) return 10;   // CONTAINS | PRECEDING
+    const pa = [], pb = [];
+    for (let n = this; n; n = n.parentNode) pa.push(n);
+    for (let n = o; n; n = n.parentNode) pb.push(n);
+    pa.reverse(); pb.reverse();
+    if (pa[0] !== pb[0]) return 1 | 32 | (idOf(this) < idOf(o) ? 4 : 2);   // DISCONNECTED | IMPLEMENTATION_SPECIFIC
+    let i = 0; while (i < pa.length && i < pb.length && pa[i] === pb[i]) i++;
+    for (let s = pa[i]; s; s = s.nextSibling) if (s === pb[i]) return 4;
+    return 2;
+  }
+  hasAttributes() { return this.nodeType === 1 && D.attrNames(this.__id).length > 0; }
+  lookupNamespaceURI() { return null; } lookupPrefix() { return null; } isDefaultNamespace() { return true; }
+  get baseURI() { return G.location.href; }
+  get prefix() { return null; } get namespaceURI() { return this.nodeType === 1 ? 'http://www.w3.org/1999/xhtml' : null; }
 }
+for (const [k, v] of Object.entries({ DOCUMENT_POSITION_DISCONNECTED: 1, DOCUMENT_POSITION_PRECEDING: 2, DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_CONTAINS: 8, DOCUMENT_POSITION_CONTAINED_BY: 16, DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC: 32 })) { Node[k] = v; Node.prototype[k] = v; }
+Node.ATTRIBUTE_NODE = 2; Node.CDATA_SECTION_NODE = 4; Node.PROCESSING_INSTRUCTION_NODE = 7; Node.DOCUMENT_TYPE_NODE = 10;
 Node.ELEMENT_NODE = 1; Node.TEXT_NODE = 3; Node.COMMENT_NODE = 8; Node.DOCUMENT_NODE = 9; Node.DOCUMENT_FRAGMENT_NODE = 11;
 class Text extends Node { get data() { return D.data(this.__id); } set data(v) { D.setData(this.__id, String(v)); } get length() { return this.data.length; } get wholeText() { return this.data; } }
 class Comment extends Node { get data() { return D.data(this.__id); } set data(v) { D.setData(this.__id, String(v)); } }
@@ -213,6 +240,9 @@ class Element extends Node {
   get text() { return this.textContent; } set text(v) { this.textContent = v; }
   matches(s) { return D.matches(this.__id, String(s)); }
   closest(s) { return wrap(D.closest(this.__id, String(s))); }
+  webkitMatchesSelector(s) { return this.matches(s); } msMatchesSelector(s) { return this.matches(s); } mozMatchesSelector(s) { return this.matches(s); }
+  getAttributeNode(n) { const v = this.getAttribute(n); return v === null ? null : { name: String(n), value: v, nodeName: String(n), nodeValue: v, specified: true }; }
+  get content() { if (this.localName !== 'template') return undefined; if (!this.__content) { const f = G.document.createDocumentFragment(); for (const k of this.childNodes) f.appendChild(k.cloneNode(true)); Object.defineProperty(this, '__content', { value: f, enumerable: false }); } return this.__content; }
   querySelector(s) { return qsOne(this.__id, s); }
   querySelectorAll(s) { return qsAll(this.__id, s); }
   getElementsByTagName(t) { return qsAll(this.__id, String(t)); }
@@ -264,7 +294,7 @@ class Document extends Node {
   createElement(t) { return wrap(D.create(String(t))); } createElementNS(ns, t) { return wrap(D.create(String(t))); }
   createTextNode(s) { return wrap(D.createText(String(s))); } createComment(s) { return wrap(D.createText('')); }
   createDocumentFragment() { return wrap(D.createFrag()); }
-  createEvent(t) { return new Event(''); } createRange() { return { setStart() {}, setEnd() {}, selectNodeContents() {}, collapse() {}, getBoundingClientRect() { return { top: 0, left: 0, width: 0, height: 0 }; }, createContextualFragment: h => { const f = G.document.createDocumentFragment(); const d = G.document.createElement('div'); d.innerHTML = h; while (d.firstChild) f.appendChild(d.firstChild); return f; } }; }
+  createEvent(t) { const k = String(t || 'Event').toLowerCase(); return k.indexOf('custom') >= 0 ? new CustomEvent('') : k.indexOf('mouse') >= 0 ? new MouseEvent('') : k.indexOf('key') >= 0 ? new KeyboardEvent('') : new Event(''); } createRange() { return { setStart() {}, setEnd() {}, selectNodeContents() {}, collapse() {}, getBoundingClientRect() { return { top: 0, left: 0, width: 0, height: 0 }; }, createContextualFragment: h => { const f = G.document.createDocumentFragment(); const d = G.document.createElement('div'); d.innerHTML = h; while (d.firstChild) f.appendChild(d.firstChild); return f; } }; }
   importNode(n, d) { return n.cloneNode(!!d); } adoptNode(n) { return n; }
   elementFromPoint() { return null; } elementsFromPoint() { return []; }
   getSelection() { return { removeAllRanges() {}, addRange() {}, toString() { return ''; }, rangeCount: 0 }; }
@@ -408,17 +438,21 @@ class Response {
 G.Headers = Headers; G.Response = Response; G.Request = function (u, o) { return Object.assign({ url: String(u) }, o); };
 G.fetch = (input, opts) => new Promise((res, rej) => {
   const url = typeof input === 'string' ? input : (input && (input.url || String(input)));
-  const r = N.fetchSync(String(url), (opts && opts.method) || 'GET');
+  const o = opts || (input && typeof input === 'object' ? input : {});
+  let hct = null; if (o.headers) { const hh = o.headers instanceof Headers ? o.headers : new Headers(o.headers); hct = hh.get('content-type'); }
+  let body = o.body; if (body && typeof body === 'object') { if (typeof body.toString === 'function' && body instanceof URLSearchParams) { body = body.toString(); hct = hct || 'application/x-www-form-urlencoded'; } else if (body instanceof FormData) { body = body.__a.map(x => encodeURIComponent(x[0]) + '=' + encodeURIComponent(x[1])).join('&'); hct = hct || 'application/x-www-form-urlencoded'; } else body = String(body); }
+  const r = N.fetchSync(String(url), o.method || 'GET', body === undefined ? undefined : String(body), hct || undefined);
   if (!r) return rej(new TypeError('Failed to fetch'));
   res(new Response(r.body, { status: r.status, url: r.url, headers: { 'content-type': r.type } }));
 });
 G.XMLHttpRequest = class XMLHttpRequest extends EventTarget {
   constructor() { super(); this.readyState = 0; this.status = 0; this.responseText = ''; this.response = null; this.responseType = ''; this.responseURL = ''; this.onload = this.onerror = this.onreadystatechange = this.onloadend = null; this.__h = {}; }
   open(m, u) { this.__m = m; this.__u = String(u); this.readyState = 1; }
-  setRequestHeader() {} overrideMimeType() {} abort() {}
+  setRequestHeader(k, v) { if (String(k).toLowerCase() === 'content-type') this.__ct = String(v); } overrideMimeType() {} abort() {}
   getResponseHeader(k) { return String(k).toLowerCase() === 'content-type' ? this.__t || null : null; } getAllResponseHeaders() { return this.__t ? 'content-type: ' + this.__t + '\r\n' : ''; }
-  send() {
-    const r = N.fetchSync(this.__u, this.__m || 'GET');
+  send(body) {
+    if (body && typeof body === 'object') body = body instanceof URLSearchParams ? body.toString() : (body instanceof FormData ? body.__a.map(x => encodeURIComponent(x[0]) + '=' + encodeURIComponent(x[1])).join('&') : String(body));
+    const r = N.fetchSync(this.__u, this.__m || 'GET', body === undefined || body === null ? undefined : String(body), this.__ct);
     G.setTimeout(() => {
       if (!r) { this.readyState = 4; this.status = 0; ['onerror', 'onloadend'].forEach(h => this[h] && this[h]({ type: h.slice(2) })); this.dispatchEvent(new Event('error')); return; }
       this.readyState = 4; this.status = r.status; this.responseText = r.body; this.responseURL = r.url; this.__t = r.type;

@@ -19,7 +19,10 @@ Protocolo (texto plano, HTTP GET):
     /state               -> lineas "#UA<TAB>dominio<TAB>User-Agent", "#DL<TAB>url<TAB>nombre<TAB>tamano" y cookies en formato Netscape
 """
 import argparse
+import json
 import os
+import shutil
+import subprocess
 import queue
 import socket
 import sys
@@ -28,7 +31,81 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-PROTOCOL = "psb-solver 1"
+PROTOCOL = "psb-solver 2"
+
+# v0.9.2: modo ayuda (/open?...&auto=1). Cuando la pagina ya NO muestra un captcha pendiente, pulsa por ti el boton de descarga
+# ("Descargar", "Download", "Continuar"...) y captura el enlace real. El captcha lo resuelves TU; el ayudante nunca lo toca.
+import re
+CLICK_WORDS = re.compile(r"^\s*(free\s+)?(slow\s+)?(descargar|download|descarga|get\s+link|obtener\s+enlace|continuar|continue|generate|generar|"
+                         r"click\s+here|haz\s+clic|start\s+download|iniciar\s+descarga|create\s+download\s+link|proceed)\b", re.I)
+CAPTCHA_SELECTORS = ["iframe[src*='challenges.cloudflare.com']", "iframe[src*='hcaptcha.com']", "iframe[src*='recaptcha']",
+                     ".cf-turnstile", ".h-captcha", ".g-recaptcha", "#cf-challenge-running"]
+AD_WORDS = ("adsterra", "popads", "propeller", "exoclick", "clickadu", "doubleclick", "juicyads", "trafficjunky")
+
+
+def looks_like_download_button(text):
+    """Funcion pura (se prueba sin navegador): el texto visible de un boton/enlace parece uno de descarga?"""
+    t = (text or "").strip()
+    return 0 < len(t) <= 30 and len(t.split()) <= 5 and bool(CLICK_WORDS.match(t))
+
+
+def pick_media(info, max_h=720):
+    """Elige UN formato reproducible por el AvPlayer de la PS4 (un solo archivo con video+audio) a partir del JSON de yt-dlp.
+    Devuelve (url, titulo, referer, tipo) o None. Funcion pura (se prueba sin yt-dlp ni red).
+    Orden: MP4 progresivo con audio hasta max_h -> HLS (directos) -> cualquier progresivo con audio."""
+    fmts = list(info.get("formats") or [])
+    if not fmts and info.get("url"):
+        fmts = [info]
+    hdr = info.get("http_headers") or {}
+    ref = hdr.get("Referer") or info.get("webpage_url") or ""
+
+    def has_av(f):
+        return (f.get("vcodec") not in (None, "none")) and (f.get("acodec") not in (None, "none"))
+
+    def h(f):
+        return int(f.get("height") or 0)
+
+    prog = [f for f in fmts if f.get("url") and has_av(f) and str(f.get("protocol", "")).startswith(("http", "https")) and f.get("ext") == "mp4"]
+    ok = [f for f in prog if 0 < h(f) <= max_h] or prog
+    if ok:
+        best = sorted(ok, key=lambda f: (h(f) <= max_h, h(f), f.get("tbr") or 0))[-1]
+        return best["url"], info.get("title") or "video", ref, "mp4"
+    hls = [f for f in fmts if f.get("url") and "m3u8" in str(f.get("protocol", "")) and has_av(f)]
+    if hls:
+        best = sorted(hls, key=lambda f: (h(f) <= max_h, h(f)))[-1]
+        return best["url"], info.get("title") or "directo", ref, "hls"
+    anyp = [f for f in fmts if f.get("url") and has_av(f)]
+    if anyp:
+        best = anyp[-1]
+        return best["url"], info.get("title") or "video", ref, "otro"
+    return None
+
+
+def resolve_media(url, max_h=720):
+    """Pide a yt-dlp (instalado en el PC) la URL directa de un video/directo (YouTube, Twitch, Stripchat...). Devuelve una linea de texto."""
+    exe = shutil.which("yt-dlp") or shutil.which("yt_dlp")
+    if not exe:
+        return "ERR\tyt-dlp no esta instalado en el PC (pip install -U yt-dlp)"
+    try:
+        p = subprocess.run([exe, "-J", "--no-playlist", "--no-warnings", url], capture_output=True, text=True, timeout=50)
+    except subprocess.TimeoutExpired:
+        return "ERR\tyt-dlp tardo demasiado"
+    if p.returncode != 0 or not p.stdout.strip():
+        msg = (p.stderr or "error desconocido").strip().splitlines()[-1][:200] if (p.stderr or "").strip() else "error desconocido"
+        return "ERR\t" + msg
+    try:
+        info = json.loads(p.stdout)
+    except ValueError:
+        return "ERR\trespuesta de yt-dlp ilegible"
+    r = pick_media(info, max_h)
+    if not r:
+        return "ERR\tno hay un formato con video y audio juntos que la PS4 pueda reproducir"
+    return "OK\t%s\t%s\t%s\t%s" % (r[0], r[1].replace("\t", " ").replace("\n", " "), r[2], r[3])
+
+
+def is_ad_host(host):
+    h = (host or "").lower()
+    return any(w in h for w in AD_WORDS)
 
 
 def lan_ip():
@@ -79,6 +156,8 @@ class Backend:
         self.ua = ""
         self.ctx = None
         self.pw = None
+        self.auto_pages = {}     # page -> {"t": ultimo intento, "n": clics hechos}
+        self.last_msg = "sin actividad"
 
     def start(self):
         from playwright.sync_api import sync_playwright  # import tardio: --fake no lo necesita
@@ -100,6 +179,18 @@ class Backend:
 
     def _watch_page(self, page):
         page.on("download", self._on_download)
+        page.on("popup", self._on_popup)
+
+    def _on_popup(self, popup):
+        """Las ventanas emergentes de publicidad se cierran solas; las demas se vigilan igual que la principal."""
+        try:
+            popup.wait_for_load_state("domcontentloaded", timeout=8000)
+            host = urllib.parse.urlparse(popup.url).netloc
+            if is_ad_host(host):
+                print("  [ayuda] ventana de publicidad cerrada (%s)" % host)
+                popup.close()
+        except Exception:
+            pass
 
     def _remember(self, url, name, size):
         if any(d["url"] == url for d in self.downloads):
@@ -128,21 +219,71 @@ class Backend:
         except Exception:
             pass
 
-    def open(self, url):
+    def open(self, url, auto=False):
         page = self.ctx.new_page()
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         page.bring_to_front()
+        if auto:
+            self.auto_pages[page] = {"t": 0.0, "n": 0}
+            self.last_msg = "abierta en modo ayuda: resuelve el captcha; luego pulsare 'Descargar' por ti"
         return "ok"
+
+    def _auto_step(self, page, st):
+        """Un paso del modo ayuda, solo con la pagina quieta (se llama desde el hilo principal)."""
+        if page.is_closed():
+            return False
+        if st["n"] >= 6 or time.time() - st["t"] < 2.5:
+            return True
+        st["t"] = time.time()
+        for sel in CAPTCHA_SELECTORS:               # hay un captcha a la vista: esperar a que lo resuelvas
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    self.last_msg = "esperando a que resuelvas el captcha en el PC"
+                    return True
+            except Exception:
+                pass
+        try:
+            cands = page.query_selector_all("a, button, input[type=submit], input[type=button], [role=button]")
+        except Exception:
+            return True
+        for el in cands:
+            try:
+                if not el.is_visible() or not el.is_enabled():
+                    continue
+                txt = (el.inner_text() or el.get_attribute("value") or "").strip()
+                if not looks_like_download_button(txt):
+                    continue
+                href = el.get_attribute("href") or ""
+                if href.startswith("http") and is_ad_host(urllib.parse.urlparse(href).netloc):
+                    continue
+                st["n"] += 1
+                self.last_msg = "pulsado '%s' (%d)" % (txt[:30], st["n"])
+                print("  [ayuda] " + self.last_msg)
+                el.click(timeout=3000)
+                return True
+            except Exception:
+                continue
+        return True
 
     def state(self):
         return build_state(self.ctx.cookies(), self.ua, self.downloads)
 
     def pump(self, ms):
         pages = self.ctx.pages
+        for pg in list(self.auto_pages):
+            try:
+                if not self._auto_step(pg, self.auto_pages[pg]):
+                    del self.auto_pages[pg]
+            except Exception:
+                self.auto_pages.pop(pg, None)
         if pages:
             pages[0].wait_for_timeout(ms)   # mantiene vivos los eventos de Playwright
         else:
             time.sleep(ms / 1000.0)
+
+    def status(self):
+        return "%s | descargas capturadas: %d" % (self.last_msg, len(self.downloads))
 
 
 class FakeBackend:
@@ -154,9 +295,12 @@ class FakeBackend:
     def start(self):
         pass
 
-    def open(self, url):
-        print("  [fake] abriria", url)
+    def open(self, url, auto=False):
+        print("  [fake] abriria", url, "(modo ayuda)" if auto else "")
         return "ok (fake)"
+
+    def status(self):
+        return "fake | descargas capturadas: %d" % len(self.downloads)
 
     def state(self):
         cookies = [{"domain": ".ejemplo.test", "path": "/", "secure": True, "httpOnly": True, "expires": time.time() + 86400, "name": "cf_clearance", "value": "FAKE"}]
@@ -214,7 +358,14 @@ def main():
                     url = (q.get("url") or [""])[0]
                     if not url.startswith(("http://", "https://")):
                         return self._send(400, "url no valida")
-                    return self._send(200, call(backend.open, url))
+                    return self._send(200, call(backend.open, url, (q.get("auto") or ["0"])[0] == "1"))
+                if u.path == "/media":
+                    url = (q.get("url") or [""])[0]
+                    if not url.startswith(("http://", "https://")):
+                        return self._send(400, "ERR\turl no valida")
+                    return self._send(200, resolve_media(url, int((q.get("h") or ["720"])[0] or 720)))
+                if u.path == "/status":
+                    return self._send(200, call(backend.status))
                 if u.path == "/state":
                     return self._send(200, call(backend.state))
                 return self._send(404, "desconocido")

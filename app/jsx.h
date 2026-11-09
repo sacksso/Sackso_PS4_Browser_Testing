@@ -13,6 +13,9 @@
 struct JsHost {
     // Descarga 'url' (absoluta). true = respuesta recibida (status/body validos).
     std::function<bool(const std::string& url, size_t maxBody, std::string& body, std::string& finalUrl, int& status, std::string& contentType)> fetch;
+    // v0.9.2: peticion con metodo (GET/POST/HEAD), cuerpo y Content-Type. Si no se define, solo GET/HEAD por 'fetch'.
+    std::function<bool(const std::string& method, const std::string& url, const std::string& reqBody, const std::string& reqContentType, size_t maxBody,
+                       std::string& body, std::string& finalUrl, int& status, std::string& contentType)> request;
     std::function<void(const std::string& line)> log;
     std::function<uint32_t()> nowMs;
     std::function<bool(const std::string& url)> blocked;          // true = no descargar este script/CSS (publicidad, rastreadores)

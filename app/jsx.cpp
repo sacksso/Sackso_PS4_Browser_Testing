@@ -51,7 +51,8 @@ struct Session {
     uint32_t t0 = 0, deadline = 0, lastSer = 0;
     int nextTimer = 1;
     int fetches = 0;
-    int domFetchBudget = 12;
+    int domFetchBudget = 28;      // v0.9.2: 12 -> 28 (Next.js/Turbopack reparte la pagina en muchos trozos)
+    uint32_t netMs = 0;           // v0.9.2: tiempo gastado en red durante la carga; el presupuesto de carga solo cuenta CPU
     int timerErrLogged = 0;
     DomNode* curScript = nullptr;
     std::vector<Timer> timers;
@@ -229,17 +230,28 @@ FN(n_resolve) { NEED(2); return jnewstr(c, g_host.resolve ? g_host.resolve(jstr(
 FN(n_fetchSync) {
     NEED(2);
     std::string url = jstr(c, argv[0]);
-    const std::string method = jstr(c, argv[1]);
-    if (url.empty() || g_s->fetches >= 10 || !g_host.fetch || (method != "GET" && method != "get" && method != "HEAD")) return JS_NULL;
+    std::string method = jstr(c, argv[1]);
+    for (char& ch : method) if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 32);
+    std::string reqBody, reqCt;
+    if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) reqBody = jstr(c, argv[2]);
+    if (argc > 3 && !JS_IsUndefined(argv[3]) && !JS_IsNull(argv[3])) reqCt = jstr(c, argv[3]);
+    const bool isPost = method == "POST";
+    if (url.empty() || g_s->fetches >= 24 || !g_host.fetch) return JS_NULL;
+    if (method != "GET" && method != "HEAD" && !(isPost && g_host.request)) return JS_NULL;
+    if (reqBody.size() > 256 * 1024) return JS_NULL;
     if (g_host.resolve) url = g_host.resolve(g_s->url, url);
     if (url.compare(0, 4, "http") != 0) return JS_NULL;
     g_s->fetches++;
     std::string body, fin, ct;
     int status = 0;
     const uint32_t t = hnow();
-    const bool ok = g_host.fetch(url, 1024 * 1024, body, fin, status, ct);
-    g_s->deadline += hnow() - t;  // el tiempo de red no cuenta para el limite del script
-    hlog("[js] fetch " + url + (ok ? " -> " + std::to_string(status) + " (" + std::to_string(body.size()) + " bytes)" : " FALLO"));
+    bool ok;
+    if (isPost) ok = g_host.request(method, url, reqBody, reqCt.empty() ? std::string("application/x-www-form-urlencoded") : reqCt, 1024 * 1024, body, fin, status, ct);
+    else ok = g_host.fetch(url, 1024 * 1024, body, fin, status, ct);
+    const uint32_t dt = hnow() - t;
+    g_s->deadline += dt;  // el tiempo de red no cuenta para el limite del script
+    g_s->netMs += dt;
+    hlog("[js] " + method + " " + url + (ok ? " -> " + std::to_string(status) + " (" + std::to_string(body.size()) + " bytes)" : " FALLO"));
     if (!ok) return JS_NULL;
     JSValue o = JS_NewObject(c);
     JS_SetPropertyStr(c, o, "status", JS_NewInt32(c, status));
@@ -297,7 +309,7 @@ static void setupEngine(Session* s) {
     R(D, head, 0); R(D, body, 0); R(D, currentScript, 0); R(D, write, 1);
 #undef R
 #define R(o, nm, len) regFns(c, o, #nm, n_##nm, len)
-    R(N, log, 2); R(N, now, 0); R(N, setTimer, 3); R(N, raf, 1); R(N, clearTimer, 1); R(N, url, 0); R(N, cookieGet, 0); R(N, cookieSet, 1); R(N, ua, 0); R(N, resolve, 2); R(N, fetchSync, 2);
+    R(N, log, 2); R(N, now, 0); R(N, setTimer, 3); R(N, raf, 1); R(N, clearTimer, 1); R(N, url, 0); R(N, cookieGet, 0); R(N, cookieSet, 1); R(N, ua, 0); R(N, resolve, 2); R(N, fetchSync, 4);
 #undef R
     JS_SetPropertyStr(c, G, "__d", D);
     JS_SetPropertyStr(c, G, "__n", N);
@@ -371,7 +383,8 @@ std::string jsx_load(const std::string& url, const std::string& html, bool runJs
         std::vector<DomNode*> scripts = s->dom.query(s->dom.root(), "script", false, nullptr);
         int ext = 0;
         for (DomNode* sc : scripts) {
-            if (hnow() - s->t0 > 9000) { hlog("[js] presupuesto de carga agotado: se omiten los scripts restantes"); break; }
+            const uint32_t wall = hnow() - s->t0;
+            if (wall > 45000 || wall - std::min(wall, s->netMs) > 9000) { hlog("[js] presupuesto de carga agotado (cpu " + std::to_string(wall - std::min(wall, s->netMs)) + " ms, pared " + std::to_string(wall) + " ms): se omiten los scripts restantes"); break; }
             const std::string* ty = Dom::getAttr(sc, "type");
             if (ty && *ty == "module") continue;  // modulos ES: sin cargador (pendiente)
             if (!isJsType(ty)) continue;           // plantillas, JSON, etc.
@@ -388,6 +401,7 @@ std::string jsx_load(const std::string& url, const std::string& html, bool runJs
                 const uint32_t t = hnow();
                 const bool ok = g_host.fetch(abs, 1536 * 1024, code, fin, status, ct);
                 s->deadline += hnow() - t;
+                s->netMs += hnow() - t;
                 ext++;
                 if (!ok || status != 200) { hlog("[js] no se pudo bajar " + abs); continue; }
                 name = abs.size() > 60 ? abs.substr(abs.size() - 60) : abs;

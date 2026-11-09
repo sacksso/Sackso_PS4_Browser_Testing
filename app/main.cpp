@@ -115,7 +115,7 @@ static void clampCfg() {
     g_cfg.pageW = std::max(800, std::min(1700, g_cfg.pageW));
     if (g_cfg.vdec != 2 && g_cfg.vdec != 3) g_cfg.vdec = 0;
     g_cfg.volume = std::max(0, std::min(100, g_cfg.volume));
-    if (g_cfg.vscale < 0 || g_cfg.vscale > 2) g_cfg.vscale = 0;
+    if (g_cfg.vscale < 0 || g_cfg.vscale > 4) g_cfg.vscale = 0;
     if (g_cfg.search < 0 || g_cfg.search > 4) g_cfg.search = 0;
     if (g_cfg.ua < 0 || g_cfg.ua > 4) g_cfg.ua = 0;
     if (g_cfg.js < 0 || g_cfg.js > 2) g_cfg.js = 2;
@@ -501,7 +501,7 @@ static std::string genSettings() {
              "<p>Decodificador: <a href=\"psb:vdec\">[ %s ]</a> (si el video no muestra imagen, prueba otro)</p>"
              "<p>Dibujar a media resolucion (mas rapido): <a href=\"psb:vhalf\">[ %s ]</a></p>"
              "<p>Volumen inicial: <a href=\"psb:vol-\">[ - ]</a> %d%% <a href=\"psb:vol+\">[ + ]</a></p>"
-             "<p>Tamano del video (via rapida): <a href=\"psb:vscale\">[ %s ]</a> (1:1 y x2 evitan escalar por CPU)</p>"
+             "<p>Tamano del video (via rapida): <a href=\"psb:vscale\">[ %s ]</a> (1:1, 1280x720 y 960x540 rellenan menos pantalla: mas fps)</p>"
              "<p>Actualizacion parcial de pantalla (experimental): <a href=\"psb:vpart\">[ %s ]</a> (solo sin raton conectado; si el video parpadea, desactivala)</p>"
              "<p><a href=\"psb:bench\">[ Medir velocidad de presentacion (F9, ~20 s) ]</a> <a href=\"about:bench\">[ ver ultimo resultado ]</a></p>"
              "<h2>Otros</h2><p><a href=\"about:bookmarks\">Marcadores</a> | <a href=\"about:home\">Inicio</a> | <a href=\"about:videos\">Videos de la pagina</a></p>"
@@ -510,7 +510,7 @@ static std::string genSettings() {
              "</body></html>",
              g_cfg.dark ? "oscuro" : "claro", g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? "si" : "no", g_cfg.images ? "si" : "no", g_cfg.mouseSens,
              g_cfg.mouseAccel ? "si" : "no", g_cfg.wheelInvert ? "si" : "no", g_cfg.wheelStep, htmlEscape(homeUrl()).c_str(), vd, g_cfg.vhalf ? "si" : "no", g_cfg.volume,
-             g_cfg.vscale == 1 ? "nativo 1:1" : (g_cfg.vscale == 2 ? "doble x2" : "ajustar a pantalla"), g_cfg.vpart ? "si" : "no");
+             g_cfg.vscale == 1 ? "nativo 1:1" : (g_cfg.vscale == 2 ? "doble x2" : (g_cfg.vscale == 3 ? "ajustar a 1280x720 (mas fps)" : (g_cfg.vscale == 4 ? "ajustar a 960x540 (maximos fps)" : "ajustar a pantalla"))), g_cfg.vpart ? "si" : "no");
     std::string out = b;
     const std::string extra =
         "<h2>Navegador</h2>"
@@ -679,7 +679,7 @@ static std::string genShortcuts() {
            "<li>Ctrl+F: buscar en la pagina (Intro / F3: siguiente, Mayus+F3: anterior, Esc: cerrar). Ctrl++ / Ctrl+-: tamano del texto, Ctrl+0: restablecer.</li>"
            "<li>Ctrl+D: marcador. Ctrl+J: descargas. Ctrl+H: historial. F8: videos de la pagina. F10: configuracion. F1: esta ayuda.</li>"
            "<li>F7: verificacion / captcha (resolverlo en el PC). Ctrl+U: codigo fuente de la pagina. Ctrl+Mayus+Supr: cookies.</li>"
-           "<li>Comandos en la barra de direcciones: <b>!solver IP:puerto</b> (ayudante del PC), <b>!ua dominio User-Agent</b>, <b>!cookies</b>, <b>!verify</b>, <b>!source</b>.</li>"
+           "<li>Comandos en la barra de direcciones: <b>!solver IP:puerto</b> (ayudante del PC), <b>!ua dominio User-Agent</b>, <b>!cookies</b>, <b>!verify</b>, <b>!source</b>, <b>!media URL</b> (video/directo resuelto por el PC con yt-dlp).</li>"
            "<li>Clic derecho / Mayus+F10 / tecla Menu: menu contextual (copiar enlace, abrir en pestana nueva, descargar...).</li></ul>"
            "<h2>Video</h2><ul>"
            "<li>Espacio / K: pausa. Izquierda / Derecha: -10 / +10 s. J / L: -30 / +30 s. Arriba / Abajo: volumen. Inicio: al principio. H: calidad. I: estadisticas. Esc / Q: cerrar.</li></ul>"
@@ -886,6 +886,21 @@ static void jsxHostInit() {
             g_assetCache[url] = {body, ct};
             g_assetCacheBytes += body.size();
         }
+        return true;
+    };
+    // v0.9.2: POST desde fetch()/XMLHttpRequest (las paginas de descarga piden el enlace real con un POST)
+    h.request = [](const std::string& method, const std::string& url, const std::string& reqBody, const std::string& reqCt, size_t maxBody,
+                   std::string& body, std::string& fin, int& status, std::string& ct) {
+        if (adBlocked(url)) { body.clear(); fin = url; status = 204; ct.clear(); return true; }
+        HttpResult r;
+        bool ok;
+        if (method == "POST") { HttpPost p; p.body = reqBody; p.contentType = reqCt; ok = http_request(url, &p, r, maxBody, 4); }
+        else ok = http_get(url, r, maxBody, 4);
+        status = r.status;
+        if (!ok) return false;
+        body = std::move(r.body);
+        fin = r.finalUrl;
+        ct = r.contentType;
         return true;
     };
     jsx_set_host(h);
@@ -1799,8 +1814,8 @@ static void solverSync() {
 static void solverOpen() {
     std::string body, err;
     if (g_challengeUrl.empty()) { g_solveMsg = "No hay pagina que abrir."; return; }
-    if (!solverGet("/open?url=" + urlPercentEncode(g_challengeUrl), body, err)) { g_solveMsg = err; return; }
-    g_solveMsg = "Abierta en el PC. Resuelvela alli y luego pulsa 'Traer cookies y descargas del PC'.";
+    if (!solverGet("/open?auto=1&url=" + urlPercentEncode(g_challengeUrl), body, err)) { g_solveMsg = err; return; }
+    g_solveMsg = "Abierta en el PC (modo ayuda). Resuelve el captcha alli: despues el ayudante pulsa Descargar por ti. Luego pulsa 'Traer cookies y descargas del PC'.";
 }
 static int importCookieFile() {
     const char* path = "/data/psbrowser/cookies_import.txt";
@@ -1838,6 +1853,22 @@ static std::string userInput(const std::string& in) {
             toast("User-Agent guardado para " + arg.substr(0, sp2));
             return "about:cookies";
         }
+        if (cmd == "media" || cmd == "yt") {   // v0.9.2: el PC (yt-dlp) busca la URL directa de YouTube/Twitch/Stripchat... y la PS4 la reproduce
+            if (arg.empty() || !urlIsHttp(arg)) { toast("Uso: !media https://... (YouTube, Twitch, Stripchat...)", true); return "about:verify"; }
+            std::string body, err;
+            toast("Pidiendo el enlace de video al PC...");
+            if (!solverGet("/media?url=" + urlPercentEncode(arg), body, err)) { toast(err, true); return "about:verify"; }
+            const size_t eol = body.find('\n');
+            std::string line = body.substr(0, eol == std::string::npos ? body.size() : eol);
+            while (!line.empty() && line.back() == '\r') line.pop_back();
+            std::vector<std::string> f;
+            size_t a = 0;
+            for (;;) { const size_t t = line.find('\t', a); if (t == std::string::npos) { f.push_back(line.substr(a)); break; } f.push_back(line.substr(a, t - a)); a = t + 1; }
+            if (f.size() < 2 || f[0] != "OK" || !urlIsHttp(f[1])) { psb_log("[media] fallo: %s", line.c_str()); toast(f.size() > 1 ? f[1] : "El PC no pudo resolver el video", true); return "about:verify"; }
+            psb_log("[media] %s tipo=%s", f[1].c_str(), f.size() > 4 ? f[4].c_str() : "?");
+            playVideo(f[1], f.size() > 2 ? f[2] : std::string("video"), f.size() > 3 ? f[3] : std::string());
+            return "about:blank";
+        }
         if (cmd == "cookies") return "about:cookies";
         if (cmd == "verify" || cmd == "captcha") return "about:verify";
         if (cmd == "source") return "about:source";
@@ -1871,7 +1902,7 @@ static bool handleAction(Browser& b, const std::string& a) {
     else if (a == "search") g_cfg.search = (g_cfg.search + 1) % 5;
     else if (a == "ua") g_cfg.ua = (g_cfg.ua + 1) % 5;
     else if (a == "clearhist") { g_history.clear(); historySave(); toast("Historial borrado"); }
-    else if (a == "vscale") g_cfg.vscale = (g_cfg.vscale + 1) % 3;
+    else if (a == "vscale") g_cfg.vscale = (g_cfg.vscale + 1) % 5;
     else if (a == "js") g_cfg.js = (g_cfg.js + 1) % 3;
     else if (a == "dlconn") { static const int seq[] = {1, 2, 4, 6, 8, 12, 0}; int i = 0; for (int k = 0; k < 7; k++) if (seq[k] == g_cfg.dlconn) i = k; g_cfg.dlconn = seq[(i + 1) % 7]; }
     else if (a.compare(0, 10, "dlconnset:") == 0) { g_cfg.dlconn = std::max(0, std::min(12, atoi(a.c_str() + 10))); navigate(b, "about:dlbench", true); configSave(); return true; }
@@ -2854,6 +2885,20 @@ static void vidTexFree() {
     if (g_vidTex) { SDL_DestroyTexture(g_vidTex); g_vidTex = nullptr; }
     g_vidTexW = g_vidTexH = 0; g_vidSerial = 0; g_vidFastPrev = false;
 }
+// v0.9.2: motivo por el que NO se usa la via rapida (el log de v0.9.1 no tenia ninguna linea RAPIDO y no se sabia por que)
+static std::string vpWhySlow(uint32_t now) {
+    if (!g_vpMode) return "sin video";
+    if (g_quitAsk) return "dialogo de salida";
+    if (!g_toast.empty()) return "aviso en pantalla";
+    const VpInfo vi = vp_info();
+    if (vi.state != VP_PLAYING) return "estado " + std::to_string(static_cast<int>(vi.state));
+    if (vi.netWait) return "esperando red";
+    if (vi.frames == 0) return "sin fotogramas";
+    if (vi.noFrameSecs >= 8) return "sin fotogramas 8 s";
+    if (g_vpStats) return "panel de estadisticas";
+    if (now - g_vpLastAct < 3000) return "overlay visible (actividad hace " + std::to_string(now - g_vpLastAct) + " ms)";
+    return "otro (via rapida fallo)";
+}
 static bool vpCleanPlayback(uint32_t now) {
     if (!g_vpMode || g_quitAsk || !g_toast.empty()) return false;
     const VpInfo vi = vp_info();
@@ -2879,6 +2924,13 @@ static bool presentVideoFast(uint32_t* tUp, uint32_t* tPres) {
     int dw = W, dh = H;
     if (static_cast<int64_t>(W) * h > static_cast<int64_t>(H) * w) dw = static_cast<int>(static_cast<int64_t>(H) * w / h);
     else dh = static_cast<int>(static_cast<int64_t>(W) * h / w);
+    if (g_cfg.vscale == 3 || g_cfg.vscale == 4) {   // v0.9.2: el coste es rellenar pixeles de pantalla (~16 ms por millon): limitar el tamano
+        const int bw = g_cfg.vscale == 3 ? 1280 : 960, bh = g_cfg.vscale == 3 ? 720 : 540;
+        if (dw > bw || dh > bh) {
+            if (static_cast<int64_t>(bw) * h > static_cast<int64_t>(bh) * w) { dh = bh; dw = static_cast<int>(static_cast<int64_t>(bh) * w / h); }
+            else { dw = bw; dh = static_cast<int>(static_cast<int64_t>(bw) * h / w); }
+        }
+    }
     if (g_cfg.vscale == 1) { dw = w; dh = h; }                            // 1:1: copia directa, sin escalar por CPU
     else if (g_cfg.vscale == 2 && w * 2 <= W && h * 2 <= H) { dw = w * 2; dh = h * 2; }  // x2 exacto si cabe
     const SDL_Rect dst = {(W - dw) / 2, (H - dh) / 2, dw, dh};
@@ -3310,7 +3362,7 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.9.1 (DOM+CSS+JS) ==");
+    psb_log("== psbrowser v0.9.2 (DOM+CSS+JS) ==");
     psb_log("[jsx] motor JS: %s | js=%d uipart=%d", jsx_has_engine() ? "QuickJS" : "no incluido", g_cfg.js, g_cfg.uipart ? 1 : 0);
     configLoad();
     cookies_load();
@@ -3581,6 +3633,12 @@ int main(int, char**) {
             fperf++;
         } else if (g_dirty) {
             g_vidFastPrev = false;
+            if (g_vpMode) {
+                static std::string lastKey; static uint32_t lastWhyT = 0;
+                const std::string why = vpWhySlow(now);
+                const std::string key = why.substr(0, why.find('('));
+                if (key != lastKey || now - lastWhyT > 5000) { lastKey = key; lastWhyT = now; psb_log("[perfv] via LENTA: %s", why.c_str()); }
+            }
             const uint32_t t0 = SDL_GetTicks();
             drawFrame();
             const uint32_t t1 = SDL_GetTicks();
