@@ -24,6 +24,10 @@ on:
         description: 'Incluir JavaScript (QuickJS-ng v0.18.0 + DOM + CSS lite). Si el build con JS falla, se reintenta solo sin motor (-DPSB_NO_JS) y queda registrado en logs/js_fallback.txt'
         type: boolean
         default: true
+      probe_sdl:
+        description: 'Sonda de SDL/GPU (v0.9.5): lista que backends de render trae el SDL del toolchain y si hay algo de GNM/GPU (solo escribe logs/sdl_probe.txt, no toca el PKG)'
+        type: boolean
+        default: true
       probe_js:
         description: 'Sonda de JavaScript: descarga QuickJS-ng y prueba a compilarlo con los flags de OpenOrbis (solo escribe logs/quickjs_probe.txt, no toca el PKG)'
         type: boolean
@@ -155,6 +159,18 @@ jobs:
           make EXTRAFLAGS="$flags" 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ] && [ "$js_ok" = "1" ]; then
+            # v0.9.5: primero se reintenta CON JavaScript pero SIN Canvas 2D (el enlace del canvas con QuickJS es lo nuevo y mas facil de romper)
+            echo "::warning::El build fallo: se reintenta con JavaScript pero SIN Canvas 2D (-DPSB_NO_CANVAS). Mira logs/build_canvas_failed.log"
+            cp "$GITHUB_WORKSPACE/logs/build.log" "$GITHUB_WORKSPACE/logs/build_canvas_failed.log"
+            echo "el build con Canvas 2D fallo (rc=$rc); si el PKG se genero es con JavaScript pero SIN Canvas 2D (getContext devuelve null)" > "$GITHUB_WORKSPACE/logs/canvas_fallback.txt"
+            rm -rf "$work/$proj/x64"
+            flags="$extra -I$proj -DPSB_NO_CANVAS"
+            echo "EXTRAFLAGS='$flags'" | tee "$GITHUB_WORKSPACE/logs/flags.txt"
+            make EXTRAFLAGS="$flags" 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
+            rc=${PIPESTATUS[0]}
+            if [ "$rc" -eq 0 ]; then echo "::warning::PKG generado SIN Canvas 2D (mira logs/build_canvas_failed.log)"; else cp "$GITHUB_WORKSPACE/logs/build.log" "$GITHUB_WORKSPACE/logs/build_nocanvas_failed.log"; fi
+          fi
+          if [ "$rc" -ne 0 ] && [ "$js_ok" = "1" ]; then
             echo "::warning::El build con JavaScript fallo: se reintenta sin motor (-DPSB_NO_JS). Mira logs/build_js_failed.log"
             cp "$GITHUB_WORKSPACE/logs/build.log" "$GITHUB_WORKSPACE/logs/build_js_failed.log"
             echo "build con QuickJS fallo (rc=$rc); PKG generado sin JavaScript (solo DOM + CSS lite)" > "$GITHUB_WORKSPACE/logs/js_fallback.txt"
@@ -197,6 +213,35 @@ jobs:
             echo "== samples"
             ls "$tc/samples" 2>/dev/null
           } > logs/toolchain_inventory.txt 2>&1 || true
+
+      # v0.9.5: que SDL/GPU ofrece el toolchain (no cambia el PKG). Responde a: ¿hay renderer acelerado? ¿hay algo de GNM?
+      - name: Sonda de SDL y GPU
+        if: ${{ always() && inputs.probe_sdl }}
+        continue-on-error: true
+        run: |
+          set +e
+          out="$GITHUB_WORKSPACE/logs/sdl_probe.txt"
+          mkdir -p "$GITHUB_WORKSPACE/logs"; : > "$out"
+          tc="${OO_PS4_TOOLCHAIN:-}"
+          {
+            echo "toolchain: $tc"
+            echo "== version de SDL"
+            grep -n -E "define SDL_(MAJOR|MINOR)_VERSION|define SDL_PATCHLEVEL" "$tc/include/SDL2/SDL_version.h" 2>/dev/null
+            echo "== lib: SDL, GNM, GPU, GL"
+            ls "$tc/lib" 2>/dev/null | grep -i -E "sdl|gnm|gpu|gl|egl|videoout|vdec" || echo "(ninguna)"
+            echo "== include: SDL, GNM, GPU, GL"
+            find "$tc/include" \( -iname '*gnm*' -o -iname '*gpu*' -o -iname '*videoout*' -o -iname 'SDL_opengl*' -o -iname 'SDL_render.h' \) 2>/dev/null | head -40
+            echo "== samples"
+            ls "$tc/samples" 2>/dev/null
+            for f in "$tc"/lib/libSDL2*.a "$tc"/lib/libSDL2*.so; do
+              [ -f "$f" ] || continue
+              echo "== simbolos/cadenas relevantes en $f"
+              grep -a -o -i -E "[a-z_0-9]*(sw_renderer|SW_RenderDriver|GL_RenderDriver|GLES2_RenderDriver|renderer_gnm|gnm|videoout|PS4_|ORBIS_)[a-z_0-9]*" "$f" | sort | uniq -c | sort -rn | head -60
+              echo "-- nombres de controladores de render"
+              grep -a -o -E "(opengles2|opengles|opengl|software|direct3d|metal|vulkan|gnm|orbis|ps4)" "$f" | sort | uniq -c
+            done
+          } >> "$out" 2>&1
+          cat "$out"
 
       # Sonda para el futuro soporte de JavaScript (no cambia el PKG): baja QuickJS-ng, lista sus archivos y API y prueba a
       # compilar cada .c con los mismos flags que usa el Makefile de OpenOrbis. Con logs/quickjs_probe.txt se escribe el enlace real.
