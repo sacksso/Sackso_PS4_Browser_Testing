@@ -163,3 +163,21 @@ void imgw_cancel() {
 }
 
 void imgw_pause(bool paused) { g_paused.store(paused); }
+
+bool imgw_decode_native(const std::string& bytes, std::vector<uint32_t>& argb, int& w, int& h) {
+    int n = 0;
+    w = h = 0;
+    if (bytes.empty() || bytes.size() > 16u * 1024 * 1024) return false;
+    const unsigned char* d = reinterpret_cast<const unsigned char*>(bytes.data());
+    if (!stbi_info_from_memory(d, static_cast<int>(bytes.size()), &w, &h, &n)) return false;
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || static_cast<long long>(w) * h > 12LL * 1000 * 1000) return false;
+    unsigned char* px = stbi_load_from_memory(d, static_cast<int>(bytes.size()), &w, &h, &n, 4);
+    if (!px) return false;
+    argb.resize(static_cast<size_t>(w) * h);
+    for (size_t i = 0; i < argb.size(); i++) {
+        const unsigned char* q = px + i * 4;  // RGBA -> ARGB
+        argb[i] = (static_cast<uint32_t>(q[3]) << 24) | (static_cast<uint32_t>(q[0]) << 16) | (static_cast<uint32_t>(q[1]) << 8) | q[2];
+    }
+    stbi_image_free(px);
+    return true;
+}

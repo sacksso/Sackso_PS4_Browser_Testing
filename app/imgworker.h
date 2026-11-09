@@ -30,3 +30,6 @@ bool imgw_poll(ImgResult& out);
 int imgw_pending();  // trabajos en cola o en curso
 void imgw_cancel();  // descarta los trabajos en cola (la navegacion cambia de pagina)
 void imgw_pause(bool paused);  // mientras es true el hilo no empieza peticiones nuevas (deja la red libre al hilo principal)
+
+// v0.9.5: decodifica una imagen a ARGB a su tamano real (sin escalar), para drawImage del Canvas 2D. Seguro desde cualquier hilo.
+bool imgw_decode_native(const std::string& bytes, std::vector<uint32_t>& argb, int& w, int& h);

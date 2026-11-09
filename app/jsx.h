@@ -9,14 +9,19 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 struct JsHost {
     // Descarga 'url' (absoluta). true = respuesta recibida (status/body validos).
     std::function<bool(const std::string& url, size_t maxBody, std::string& body, std::string& finalUrl, int& status, std::string& contentType)> fetch;
     // v0.9.2: peticion con metodo (GET/POST/HEAD), cuerpo y Content-Type. Si no se define, solo GET/HEAD por 'fetch'.
-    std::function<bool(const std::string& method, const std::string& url, const std::string& reqBody, const std::string& reqContentType, size_t maxBody,
+    // v0.9.3: 'extraHeaders' = lineas "Nombre: valor\n" que puso la pagina (X-Requested-With, tokens...) y 'referer' = pagina que la hace.
+    std::function<bool(const std::string& method, const std::string& url, const std::string& reqBody, const std::string& reqContentType,
+                       const std::string& extraHeaders, const std::string& referer, size_t maxBody,
                        std::string& body, std::string& finalUrl, int& status, std::string& contentType)> request;
     std::function<void(const std::string& line)> log;
+    // v0.9.5: decodifica una imagen a ARGB de tamano real (PNG/JPEG/BMP) para drawImage del Canvas 2D. Si no se define, las imagenes no se cargan.
+    std::function<bool(const std::string& bytes, std::vector<uint32_t>& argb, int& w, int& h)> decodeImage;
     std::function<uint32_t()> nowMs;
     std::function<bool(const std::string& url)> blocked;          // true = no descargar este script/CSS (publicidad, rastreadores)
     std::function<std::string(const std::string& url)> getCookies;           // document.cookie (sin HttpOnly)
@@ -31,6 +36,8 @@ struct JsxInfo {
     int scripts = 0;          // ejecutados
     int scriptErrors = 0;
     int cssFiles = 0;         // hojas externas descargadas
+    int modulesSkipped = 0;   // v0.9.3: <script type=module> omitidos (sin cargador de modulos ES)
+    int hostsDead = 0;        // v0.9.3: servidores que no respondieron y se dejaron de pedir en esta carga
     int htmlIn = 0, htmlOut = 0;
     uint32_t ms = 0;          // tiempo total de la carga
 };
@@ -49,3 +56,7 @@ bool jsx_active(void* owner);
 bool jsx_pump(void* owner, uint32_t nowMs, std::string* outHtml);
 // Texto de estado para el log/ajustes.
 std::string jsx_status();
+
+// v0.9.5: modo juego (Canvas 2D a pantalla completa). Ver docs/V0.9.5.md.
+bool jsx_eval(void* owner, const std::string& code);  // ejecuta codigo en la pagina activa (eventos de teclado/mando/raton hacia la pagina)
+void jsx_set_game_mode(bool on);                      // en modo juego jsx_pump no vuelve a serializar el DOM (no hay re-maquetado)

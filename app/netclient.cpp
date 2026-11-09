@@ -125,6 +125,18 @@ static std::string resolveUrl(const std::string& base, const std::string& loc) {
     return dir + loc;
 }
 
+bool http_header_forbidden(const std::string& name) {
+    if (name.empty() || name.size() > 64) return true;
+    std::string n;
+    for (char ch : name) {
+        const bool tokenOk = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_';
+        if (!tokenOk) return true;  // espacios, ':' , CR/LF...: no es un nombre de cabecera valido
+        n += static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + 32 : ch);
+    }
+    static const char* bad[] = {"host", "content-length", "cookie", "connection", "accept-encoding", "transfer-encoding", "upgrade", "te", "keep-alive", "proxy-authorization", "content-type", "range"};
+    for (const char* b : bad) if (n == b) return true;
+    return false;
+}
 // compat=true: conexion sin keep-alive y con cabeceras Accept / Accept-Encoding explicitas (reintento tras un fallo en sendRequest).
 static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& out, size_t maxBody, std::string& redirectTo, bool compat,
                       HttpSink* sink, HttpGate gate, const HttpExtra* extra) {
@@ -154,8 +166,11 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
     }
     tpl = sceHttpCreateTemplate(g_httpCtxId, ua.c_str(), ORBIS_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { fail("createTemplate", tpl); tpl = 0; goto done; }
-    sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
-    sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);
+    {
+        const int ctoMs = (extra && extra->connectTimeoutMs > 0) ? std::min(extra->connectTimeoutMs, 30000) : 10000;
+        sceHttpSetResolveTimeOut(tpl, static_cast<uint32_t>(ctoMs) * 1000u);
+        sceHttpSetConnectTimeOut(tpl, static_cast<uint32_t>(ctoMs) * 1000u);
+    }
     sceHttpsSetSslCallback(tpl, sslCallback, nullptr);
     // Hipotesis de la prueba 2: las paginas /wiki/ de Wikipedia mandan cabeceras de respuesta grandes y libSceHttp tiene un
     // limite por defecto pequeno (www.wikipedia.org y action=raw, con menos cabeceras, si funcionan). La cabecera de OpenOrbis
@@ -195,6 +210,10 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
             sceHttpAddRequestHeader(req, "Range", rg, 0);
         }
         if (!extra->referer.empty()) sceHttpAddRequestHeader(req, "Referer", extra->referer.c_str(), 0);
+        for (const auto& hv : extra->headers) {
+            if (http_header_forbidden(hv.first) || hv.second.find('\r') != std::string::npos || hv.second.find('\n') != std::string::npos) continue;
+            sceHttpAddRequestHeader(req, hv.first.c_str(), hv.second.c_str(), 0);
+        }
     }
     {
         const std::string ck = cookies_header(url);
@@ -299,7 +318,8 @@ bool http_request_nolock(const std::string& url, const HttpPost* post, HttpResul
         std::string next;
         psb_log("[http] %s %s", post ? "POST" : "GET", cur.c_str());
         bool good = singleGet(cur, post, out, maxBody, next, false, sink, gate, extra);
-        if (!good && (out.stage == "sendRequest" || out.stage == "decode")) {
+        // v0.9.3: un TIMEOUT (0x80431068) no mejora con otro modo: el reintento solo duplicaba la espera (22 s en pkg-zone.com)
+        if (!good && (out.stage == "sendRequest" || out.stage == "decode") && static_cast<unsigned>(out.sceError) != 0x80431068u) {
             psb_log("[http] reintento en modo compat (sin keep-alive, Accept-Encoding: identity)");
             good = singleGet(cur, post, out, maxBody, next, true, sink, gate, extra);
             psb_log("[http] reintento: %s", good ? "OK" : "FALLO tambien");

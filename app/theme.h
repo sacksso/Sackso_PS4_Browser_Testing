@@ -20,6 +20,13 @@ inline Theme themeDark() {
                  0xFF2D2E31, 0xFF80868B, 0xFF3C4043, 0xFF5F6368, 0xFF2D2E31, 0xFF5F6368, 0xFF2D2E31, 0xFFE8EAED, 0xFFF28B82};
 }
 
+// v0.9.3: alto contraste (accesibilidad): negro puro, texto blanco, enlaces y foco amarillos, bordes marcados.
+inline Theme themeContrast() {
+    return Theme{true, 0xFF000000, 0xFFFFFFFF, 0xFFD0D0D0, 0xFFFFFF00, 0xFFFFFFFF, 0xFFFFFFFF, 0xFF1A1A1A, 0xFFFFFFFF, 0xFF1A1A1A, 0xFFFFFFFF,
+                 0xFF000000, 0xFF202020, 0xFF101010, 0xFF202020, 0xFF000000, 0xFFFFFFFF, 0xFFFFFF00, 0xFF0000A0, 0xFFFFFFFF,
+                 0xFF1A1A1A, 0xFFFFFFFF, 0xFF202020, 0xFFFFFFFF, 0xFF1A1A1A, 0xFFFFFFFF, 0xFF000000, 0xFFFFFFFF, 0xFFFF6060};
+}
+
 inline int lumOf(uint32_t c) { return (static_cast<int>((c >> 16) & 255) * 299 + static_cast<int>((c >> 8) & 255) * 587 + static_cast<int>(c & 255) * 114) / 1000; }
 // Si el color pedido por la pagina casi no se distingue del fondo, se usa el del tema.
 inline uint32_t fixContrast(uint32_t fg, uint32_t bg, uint32_t fallback) {

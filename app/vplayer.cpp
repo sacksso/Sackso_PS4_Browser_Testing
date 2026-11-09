@@ -1,4 +1,5 @@
 #include "vplayer.h"
+#include "vsniff.h"
 
 #include <orbis/AudioOut.h>
 #include <orbis/Sysmodule.h>
@@ -320,6 +321,13 @@ void openMain(std::string source, std::string referer) {
     setStage(isHttp ? "Conectando con el servidor..." : "Abriendo el archivo...");
     if (!P.src->open(err)) { setError(err); return; }
     if (P.cancel) return;
+    {   // v0.9.3: formatos que el AvPlayer no lee (WebM/MKV, FLV, AVI, HLS, una pagina web): avisar ya, no a los 40 s
+        uint8_t head[16];
+        memset(head, 0, sizeof(head));
+        const int hn = P.src->read(head, 0, sizeof(head));
+        std::string why;
+        if (hn > 0 && vsniff(head, static_cast<size_t>(hn), why)) { psb_log("[vp] formato no compatible: %s", why.c_str()); setError(why); return; }
+    }
 
     setStage("Cargando el reproductor del sistema...");
     int rc = 0;

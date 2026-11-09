@@ -3,6 +3,8 @@
 // Ventajas: DNS, TLS y almacen de certificados los pone la consola (no hace falta libcurl ni mbedTLS para empezar).
 #include <cstddef>
 #include <string>
+#include <utility>
+#include <vector>
 
 struct HttpResult {
     int status = -1;          // codigo HTTP (200, 404...), -1 si no hubo respuesta
@@ -39,7 +41,15 @@ typedef bool (*HttpGate)(const HttpResult& r);
 struct HttpExtra {
     long long rangeStart = -1, rangeEnd = -1;  // rangeStart >= 0 => 'Range: bytes=start-end' (end = -1: hasta el final)
     std::string referer;
+    // v0.9.3: tiempo maximo para resolver el nombre y conectar (0 = 10 s). Los scripts de terceros y el ayudante del PC usan 4-6 s:
+    // un servidor muerto ya no congela la carga de la pagina 20 s.
+    int connectTimeoutMs = 0;
+    // v0.9.3: cabeceras extra de fetch()/XMLHttpRequest (X-Requested-With, X-CSRF-Token, Authorization, Origin...).
+    // Se ignoran Host, Content-Length, Cookie (las pone el almacen de cookies), Connection, Accept-Encoding y las que lleven CR/LF.
+    std::vector<std::pair<std::string, std::string>> headers;
 };
+// true si 'name' no debe copiarse de una peticion de JavaScript (la pone el cliente o es peligrosa).
+bool http_header_forbidden(const std::string& name);
 
 // Cuerpo de un POST (por ejemplo application/x-www-form-urlencoded).
 struct HttpPost {

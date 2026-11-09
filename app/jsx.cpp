@@ -10,6 +10,7 @@
 #include <memory>
 #include <vector>
 
+#include "canvas2d.h"
 #include "dom.h"
 
 #ifndef PSB_NO_JS
@@ -23,6 +24,19 @@ static JsHost g_host;
 void jsx_set_host(const JsHost& h) { g_host = h; }
 static void hlog(const std::string& s) { if (g_host.log) g_host.log(s); }
 static uint32_t hnow() { return g_host.nowMs ? g_host.nowMs() : 0; }
+// Servidor (sin puerto) de una URL absoluta, en minusculas.
+static std::string hostOfUrl(const std::string& u) {
+    const size_t a = u.find("://");
+    if (a == std::string::npos) return std::string();
+    size_t b = u.find_first_of("/?#", a + 3);
+    std::string h = u.substr(a + 3, b == std::string::npos ? std::string::npos : b - (a + 3));
+    const size_t at = h.rfind('@');
+    if (at != std::string::npos) h = h.substr(at + 1);
+    const size_t c = h.rfind(':');
+    if (c != std::string::npos && h.find(']') == std::string::npos) h.resize(c);
+    for (char& ch : h) if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch + 32);
+    return h;
+}
 bool jsx_has_engine() {
 #ifndef PSB_NO_JS
     return true;
@@ -51,9 +65,11 @@ struct Session {
     uint32_t t0 = 0, deadline = 0, lastSer = 0;
     int nextTimer = 1;
     int fetches = 0;
+    int imgFetches = 0;           // v0.9.5: imagenes cargadas para el Canvas 2D
     int domFetchBudget = 28;      // v0.9.2: 12 -> 28 (Next.js/Turbopack reparte la pagina en muchos trozos)
     uint32_t netMs = 0;           // v0.9.2: tiempo gastado en red durante la carga; el presupuesto de carga solo cuenta CPU
     int timerErrLogged = 0;
+    std::vector<std::string> deadHosts;   // v0.9.3: servidores que dieron error de red: no se vuelven a pedir en esta pagina
     DomNode* curScript = nullptr;
     std::vector<Timer> timers;
     std::string status;
@@ -64,17 +80,34 @@ struct Session {
     ~Session();
 };
 Session* g_s = nullptr;
+bool g_gameMode = false;   // v0.9.5: modo juego (no re-serializar el DOM)
 }  // namespace
+
+static bool hostIsDead(const std::string& url) {
+    if (!g_s || g_s->deadHosts.empty()) return false;
+    const std::string h = hostOfUrl(url);
+    for (const std::string& d : g_s->deadHosts) if (d == h) return true;
+    return false;
+}
+// Un error de red (sin respuesta HTTP) en un servidor: no volver a pedirle nada en esta pagina (pkg-zone.com tardaba 22 s por un script muerto).
+static void markHostDead(const std::string& url, int status) {
+    if (!g_s || status > 0) return;
+    const std::string h = hostOfUrl(url);
+    if (h.empty() || hostIsDead(url)) return;
+    g_s->deadHosts.push_back(h);
+    hlog("[js] servidor sin respuesta, no se vuelve a pedir en esta pagina: " + h);
+}
 
 #ifndef PSB_NO_JS
 Session::~Session() {
+    c2d_reset_all();  // v0.9.5: los canvas pertenecen a la pagina
     for (Timer& t : timers) if (ctx) JS_FreeValue(ctx, t.fn);
     timers.clear();
     if (ctx) JS_FreeContext(ctx);
     if (rt) JS_FreeRuntime(rt);
 }
 #else
-Session::~Session() {}
+Session::~Session() { c2d_reset_all(); }
 #endif
 
 #ifndef PSB_NO_JS
@@ -235,24 +268,28 @@ FN(n_fetchSync) {
     std::string reqBody, reqCt;
     if (argc > 2 && !JS_IsUndefined(argv[2]) && !JS_IsNull(argv[2])) reqBody = jstr(c, argv[2]);
     if (argc > 3 && !JS_IsUndefined(argv[3]) && !JS_IsNull(argv[3])) reqCt = jstr(c, argv[3]);
+    std::string reqHdrs;
+    if (argc > 4 && !JS_IsUndefined(argv[4]) && !JS_IsNull(argv[4])) { reqHdrs = jstr(c, argv[4]); if (reqHdrs.size() > 8192) reqHdrs.clear(); }
     const bool isPost = method == "POST";
     if (url.empty() || g_s->fetches >= 24 || !g_host.fetch) return JS_NULL;
-    if (method != "GET" && method != "HEAD" && !(isPost && g_host.request)) return JS_NULL;
+    if (method != "GET" && method != "HEAD" && !(isPost && g_host.request)) return JS_NULL;  // PUT/DELETE/PATCH: sin soporte
     if (reqBody.size() > 256 * 1024) return JS_NULL;
     if (g_host.resolve) url = g_host.resolve(g_s->url, url);
     if (url.compare(0, 4, "http") != 0) return JS_NULL;
+    if (hostIsDead(url)) { hlog("[js] " + method + " " + url + " omitido (servidor sin respuesta)"); return JS_NULL; }
     g_s->fetches++;
     std::string body, fin, ct;
     int status = 0;
     const uint32_t t = hnow();
     bool ok;
-    if (isPost) ok = g_host.request(method, url, reqBody, reqCt.empty() ? std::string("application/x-www-form-urlencoded") : reqCt, 1024 * 1024, body, fin, status, ct);
+    // v0.9.3: con 'request' tambien los GET llevan Referer y las cabeceras de la pagina; sin cuerpo el tipo por defecto de un POST de texto es text/plain, como en un navegador
+    if (g_host.request) ok = g_host.request(method, url, reqBody, reqCt.empty() ? std::string(isPost ? "text/plain;charset=UTF-8" : "") : reqCt, reqHdrs, g_s->url, 1024 * 1024, body, fin, status, ct);
     else ok = g_host.fetch(url, 1024 * 1024, body, fin, status, ct);
     const uint32_t dt = hnow() - t;
     g_s->deadline += dt;  // el tiempo de red no cuenta para el limite del script
     g_s->netMs += dt;
     hlog("[js] " + method + " " + url + (ok ? " -> " + std::to_string(status) + " (" + std::to_string(body.size()) + " bytes)" : " FALLO"));
-    if (!ok) return JS_NULL;
+    if (!ok) { markHostDead(url, status); return JS_NULL; }
     JSValue o = JS_NewObject(c);
     JS_SetPropertyStr(c, o, "status", JS_NewInt32(c, status));
     JS_SetPropertyStr(c, o, "body", jnewstr(c, body));
@@ -260,6 +297,98 @@ FN(n_fetchSync) {
     JS_SetPropertyStr(c, o, "type", jnewstr(c, ct));
     return o;
 }
+
+#ifndef PSB_NO_CANVAS
+// ---- __c: Canvas 2D (v0.9.5). El dibujo lo hace app/canvas2d.cpp; aqui solo se pasan numeros y textos.
+static bool b64decode(const std::string& in, std::string& out) {
+    int val = 0, bits = -8;
+    out.clear();
+    for (unsigned char ch : in) {
+        int d;
+        if (ch >= 'A' && ch <= 'Z') d = ch - 'A';
+        else if (ch >= 'a' && ch <= 'z') d = ch - 'a' + 26;
+        else if (ch >= '0' && ch <= '9') d = ch - '0' + 52;
+        else if (ch == '+' || ch == '-') d = 62;
+        else if (ch == '/' || ch == '_') d = 63;
+        else if (ch == '=') break;
+        else continue;  // espacios y saltos de linea
+        val = (val << 6) | d; bits += 6;
+        if (bits >= 0) { out.push_back(static_cast<char>((val >> bits) & 0xFF)); bits -= 8; }
+        if (out.size() > 12u * 1024 * 1024) return false;
+    }
+    return !out.empty();
+}
+static bool loadCanvasImage(std::string url, int& id, int& w, int& h) {
+    if (url.empty() || g_s->imgFetches >= 150 || !g_host.decodeImage) return false;
+    std::string body;
+    if (url.compare(0, 5, "data:") == 0) {
+        const size_t comma = url.find(',');
+        if (comma == std::string::npos || url.substr(0, comma).find(";base64") == std::string::npos) return false;
+        if (!b64decode(url.substr(comma + 1), body)) return false;
+    } else {
+        if (g_host.resolve) url = g_host.resolve(g_s->url, url);
+        if (url.compare(0, 4, "http") != 0) return false;
+        if (hostIsDead(url) || (g_host.blocked && g_host.blocked(url))) return false;
+        g_s->imgFetches++;
+        std::string fin, ct;
+        int status = 0;
+        const uint32_t t = hnow();
+        bool ok;
+        if (g_host.request) ok = g_host.request("GET", url, "", "", "", g_s->url, 8u * 1024 * 1024, body, fin, status, ct);
+        else ok = g_host.fetch(url, 8u * 1024 * 1024, body, fin, status, ct);
+        const uint32_t dt = hnow() - t;
+        g_s->netMs += dt;
+        if (!ok) markHostDead(url, 0);
+        hlog("[canvas] imagen " + url.substr(0, 160) + (ok ? " -> " + std::to_string(status) + " (" + std::to_string(body.size()) + " bytes, " + std::to_string(dt) + " ms)" : " FALLO"));
+        if (!ok || status < 200 || status >= 300) return false;
+    }
+    std::vector<uint32_t> px;
+    if (!g_host.decodeImage(body, px, w, h)) { hlog("[canvas] no se pudo decodificar la imagen (" + std::to_string(body.size()) + " bytes)"); return false; }
+    id = c2d_add_image(px, w, h);
+    return id > 0;
+}
+FN(c_create) { NEED(2); return JS_NewInt32(c, c2d_create(jint(c, argv[0], 300), jint(c, argv[1], 150))); }
+FN(c_resize) { NEED(3); c2d_resize(jint(c, argv[0], 0), jint(c, argv[1], 300), jint(c, argv[2], 150)); return JS_UNDEFINED; }
+FN(c_op) {
+    NEED(2);
+    double a[12];
+    int n = 0;
+    for (int i = 2; i < argc && n < 12; i++) {
+        double d = 0;
+        if (JS_ToFloat64(c, &d, argv[i]) != 0) { JSValue ex = JS_GetException(c); JS_FreeValue(c, ex); d = 0; }
+        a[n++] = d;
+    }
+    return JS_NewFloat64(c, c2d_op(jint(c, argv[0], 0), jint(c, argv[1], 0), a, n));
+}
+FN(c_str) { NEED(3); c2d_set_str(jint(c, argv[0], 0), jint(c, argv[1], 0), jstr(c, argv[2])); return JS_UNDEFINED; }
+FN(c_image) {
+    NEED(1);
+    const uint32_t t0 = hnow();
+    int id = 0, w = 0, h = 0;
+    const bool ok = loadCanvasImage(jstr(c, argv[0]), id, w, h);
+    g_s->deadline += hnow() - t0;  // red y decodificacion no cuentan para el limite del script
+    if (!ok) return JS_NULL;
+    JSValue o = JS_NewObject(c);
+    JS_SetPropertyStr(c, o, "id", JS_NewInt32(c, id));
+    JS_SetPropertyStr(c, o, "w", JS_NewInt32(c, w));
+    JS_SetPropertyStr(c, o, "h", JS_NewInt32(c, h));
+    return o;
+}
+FN(c_getPixels) {
+    NEED(5);
+    const std::vector<uint8_t> v = c2d_get_pixels(jint(c, argv[0], 0), jint(c, argv[1], 0), jint(c, argv[2], 0), jint(c, argv[3], 0), jint(c, argv[4], 0));
+    if (v.empty()) return JS_NULL;
+    return JS_NewArrayBufferCopy(c, v.data(), v.size());
+}
+FN(c_putPixels) {
+    NEED(6);
+    size_t len = 0;
+    uint8_t* buf = JS_GetArrayBuffer(c, &len, argv[5]);
+    if (!buf) { JSValue ex = JS_GetException(c); JS_FreeValue(c, ex); return JS_UNDEFINED; }
+    c2d_put_pixels(jint(c, argv[0], 0), jint(c, argv[1], 0), jint(c, argv[2], 0), jint(c, argv[3], 0), jint(c, argv[4], 0), buf, len);
+    return JS_UNDEFINED;
+}
+#endif
 
 static void regFns(JSContext* c, JSValueConst obj, const char* nm, JSCFunction* f, int len) { JS_SetPropertyStr(c, obj, nm, JS_NewCFunction(c, f, nm, len)); }
 
@@ -313,6 +442,12 @@ static void setupEngine(Session* s) {
 #undef R
     JS_SetPropertyStr(c, G, "__d", D);
     JS_SetPropertyStr(c, G, "__n", N);
+#ifndef PSB_NO_CANVAS
+    JSValue CV = JS_NewObject(c);
+    regFns(c, CV, "create", c_create, 2); regFns(c, CV, "resize", c_resize, 3); regFns(c, CV, "op", c_op, 2); regFns(c, CV, "str", c_str, 3);
+    regFns(c, CV, "image", c_image, 1); regFns(c, CV, "getPixels", c_getPixels, 5); regFns(c, CV, "putPixels", c_putPixels, 6);
+    JS_SetPropertyStr(c, G, "__c", CV);
+#endif
     JS_FreeValue(c, G);
 }
 
@@ -363,10 +498,12 @@ std::string jsx_load(const std::string& url, const std::string& html, bool runJs
             const std::string abs = g_host.resolve ? g_host.resolve(url, href) : href;
             if (abs.compare(0, 4, "http") != 0) continue;
             if (g_host.blocked && g_host.blocked(abs)) continue;
+            if (hostIsDead(abs)) continue;
             std::string body, fin, ct;
             int status = 0;
-            if (g_host.fetch(abs, 400 * 1024, body, fin, status, ct) && status == 200 && !body.empty()) { s->dom.addStyleSheet(body); n++; hlog("[css] " + abs + " (" + std::to_string(body.size()) + " bytes)"); }
-            else hlog("[css] fallo " + abs);
+            const bool okCss = g_host.fetch(abs, 400 * 1024, body, fin, status, ct);
+            if (okCss && status == 200 && !body.empty()) { s->dom.addStyleSheet(body); n++; hlog("[css] " + abs + " (" + std::to_string(body.size()) + " bytes)"); }
+            else { hlog("[css] fallo " + abs); if (!okCss) markHostDead(abs, status); }
         }
         I.cssFiles = n;
     }
@@ -386,7 +523,7 @@ std::string jsx_load(const std::string& url, const std::string& html, bool runJs
             const uint32_t wall = hnow() - s->t0;
             if (wall > 45000 || wall - std::min(wall, s->netMs) > 9000) { hlog("[js] presupuesto de carga agotado (cpu " + std::to_string(wall - std::min(wall, s->netMs)) + " ms, pared " + std::to_string(wall) + " ms): se omiten los scripts restantes"); break; }
             const std::string* ty = Dom::getAttr(sc, "type");
-            if (ty && *ty == "module") continue;  // modulos ES: sin cargador (pendiente)
+            if (ty && *ty == "module") { I.modulesSkipped++; continue; }  // modulos ES: sin cargador (pendiente)
             if (!isJsType(ty)) continue;           // plantillas, JSON, etc.
             std::string code;
             std::string name = "inline";
@@ -396,6 +533,7 @@ std::string jsx_load(const std::string& url, const std::string& html, bool runJs
                 const std::string abs = g_host.resolve ? g_host.resolve(url, *src) : *src;
                 if (abs.compare(0, 4, "http") != 0) continue;
                 if (g_host.blocked && g_host.blocked(abs)) { hlog("[js] bloqueado (publicidad/rastreo): " + abs); continue; }
+                if (hostIsDead(abs)) { hlog("[js] omitido (servidor sin respuesta): " + abs); continue; }
                 std::string fin, ct;
                 int status = 0;
                 const uint32_t t = hnow();
@@ -403,7 +541,7 @@ std::string jsx_load(const std::string& url, const std::string& html, bool runJs
                 s->deadline += hnow() - t;
                 s->netMs += hnow() - t;
                 ext++;
-                if (!ok || status != 200) { hlog("[js] no se pudo bajar " + abs); continue; }
+                if (!ok || status != 200) { hlog("[js] no se pudo bajar " + abs); if (!ok) markHostDead(abs, status); continue; }
                 name = abs.size() > 60 ? abs.substr(abs.size() - 60) : abs;
                 hlog("[js] script " + abs + " (" + std::to_string(code.size()) + " bytes)");
             } else {
@@ -425,6 +563,8 @@ std::string jsx_load(const std::string& url, const std::string& html, bool runJs
 #else
     (void)runJs;
 #endif
+    I.hostsDead = static_cast<int>(s->deadHosts.size());
+    if (I.modulesSkipped > 0) hlog("[jsx] " + std::to_string(I.modulesSkipped) + " script(s) type=module omitidos (la pagina puede quedar vacia o incompleta)");
     std::string out = s->dom.serialize(true, engine);
     I.htmlOut = static_cast<int>(out.size());
     if (out.size() < 40) { hlog("[dom] resultado vacio: se usa el HTML original"); out = html; I.htmlOut = I.htmlIn; }
@@ -493,7 +633,7 @@ bool jsx_pump(void* owner, uint32_t now, std::string* outHtml) {
     }
     // compactar la lista de vencidos
     s->timers.erase(std::remove_if(s->timers.begin(), s->timers.end(), [](const Timer& t) { return t.id < 0; }), s->timers.end());
-    if (s->dom.dirty && now - s->lastSer >= 120) {
+    if (outHtml && !g_gameMode && s->dom.dirty && now - s->lastSer >= 120) {
         *outHtml = s->dom.serialize(true, true);
         s->lastSer = now;
         return true;
@@ -502,6 +642,21 @@ bool jsx_pump(void* owner, uint32_t now, std::string* outHtml) {
     (void)owner; (void)now; (void)outHtml;
 #endif
     return false;
+}
+
+void jsx_set_game_mode(bool on) { g_gameMode = on; }
+bool jsx_eval(void* owner, const std::string& code) {
+#ifndef PSB_NO_JS
+    Session* s = g_s;
+    if (!s || !s->js || s->owner != owner) return false;
+    s->deadline = hnow() + 250;
+    const bool ok = evalCode(s, code, "<entrada>");
+    drainJobs(s);
+    return ok;
+#else
+    (void)owner; (void)code;
+    return false;
+#endif
 }
 
 std::string jsx_status() { return g_s ? g_s->status : std::string("(sin sesion)"); }

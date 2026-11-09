@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 #include "canvas.h"
+#include "canvas2d.h"
 #include "charset.h"
 #include "htmldoc.h"
 #include "jsx.h"
@@ -49,6 +50,7 @@
 #include "download.h"
 #include "asyncwriter.h"
 #include "vplayer.h"
+#include "neterr.h"
 // Lo piden los .h/.cpp de los samples de OpenOrbis (log.h): ellos lo declaran y el programa lo define.
 std::stringstream debugLogStream;
 static FILE* g_log = nullptr;
@@ -74,7 +76,7 @@ static const int TABBAR_H = 40, TOOLBAR_Y = 40, TOOLBAR_H = 48, VIEW_Y = 88, SBA
 static const int VIEW_H = H - VIEW_Y;
 // Codigos de tecla USB HID (los mismos que usa OpenOrbis en orbis/_types/keyboard.h).
 enum {
-    K_A = 4, K_N = 17, K_Y = 28, K_H = 11, K_I = 12, K_K = 14, K_Q = 20, K_F8 = 65, K_F9 = 66, K_F = 9, K_F1 = 58, K_F3 = 60, K_C = 6, K_D = 7, K_J = 13, K_L = 15, K_R = 21, K_T = 23, K_V = 25, K_W = 26, K_X = 27, K_1 = 30, K_9 = 38, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
+    K_A = 4, K_N = 17, K_Y = 28, K_H = 11, K_I = 12, K_K = 14, K_Q = 20, K_S = 22, K_F8 = 65, K_F9 = 66, K_F = 9, K_F1 = 58, K_F2 = 59, K_F3 = 60, K_C = 6, K_D = 7, K_J = 13, K_L = 15, K_R = 21, K_T = 23, K_V = 25, K_W = 26, K_X = 27, K_1 = 30, K_9 = 38, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
     K_MINUS = 45, K_EQUAL = 46, K_F5 = 62, K_F6 = 63, K_F7 = 64, K_F10 = 67, K_U = 24, K_DELETE = 76, K_HOME = 74, K_PGUP = 75, K_END = 77, K_PGDOWN = 78,
     K_RIGHT = 79, K_LEFT = 80, K_DOWN = 81, K_UP = 82, K_APP = 101  // K_APP = tecla de menu contextual
 };
@@ -92,19 +94,29 @@ struct Config {
     bool images = true;
     int vdec = 0;             // decodificador de video: 0 sistema (hardware), 2 software, 3 software2
     bool vhalf = true;        // dibujar el video a media resolucion (mas rapido)
-    int vscale = 0;           // tamano del video en la via rapida: 0 ajustar a pantalla, 1 nativo 1:1 (sin escalar), 2 doble (x2 si cabe)
+    int vscale = 3;           // tamano del video en la via rapida (v0.9.3: por defecto 3 = 1280x720): 0 ajustar a pantalla, 1 nativo 1:1 (sin escalar), 2 doble (x2 si cabe)
     int search = 0;           // motor de busqueda de la barra (ver url.h)
     int ua = 0;               // User-Agent: 0 PS4, 1 Chrome, 2 Firefox, 3 Smart TV, 4 Lynx (paginas simples)
     bool vpart = false;       // EXPERIMENTAL: actualizar solo el rectangulo del video (SDL_UpdateWindowSurfaceRects) en vez de toda la pantalla
     bool uipart = true;       // actualizar solo las zonas que cambian de la interfaz (el bench mostro que rellenar 1920x1080 cuesta ~33 ms)
+    int gscale = 1;           // v0.9.5: modo juego: 0 = ajustar a la pantalla (escala por CPU, mas lento), 1 = 1:1 centrado (rapido), 2 = x2 si cabe
+    int gpu = 0;              // v0.9.5: 0 = renderer por software (como siempre); 1 = intentar un renderer ACELERADO de SDL si el sistema lo ofrece (si no, software). Experimental
     int dlconn = 8;           // descargas: MAXIMO de conexiones paralelas (1..12; empieza con 2 y sube sola); 0 = motor antiguo (un solo flujo, sin reanudar)
     bool cookies = true;      // guardar/enviar cookies (sesiones, verificaciones resueltas)
     bool adblock = true;      // no descargar scripts de publicidad/rastreo conocidos (mas rapido y menos errores)
     std::string solver;       // ayudante del PC para resolver captchas/verificaciones (IP:puerto), ver tools/solver
     int js = 2;               // 0 = maquetador original; 1 = DOM + CSS lite; 2 = DOM + CSS lite + JavaScript (QuickJS)
     int volume = 80;          // volumen por defecto del reproductor (0..100)
+    bool contrast = false;    // v0.9.3: tema de alto contraste (negro, texto blanco, enlaces amarillos)
+    int curscale = 100;       // v0.9.3: tamano del cursor del raton en % (100, 150, 200)
+    int cfgv = 0;             // v0.9.3: version del archivo de configuracion (para migrar valores por defecto una sola vez)
 };
 static Config g_cfg;
+// v0.9.5: estado del renderer (ver createRenderer(), mas abajo)
+static bool g_gpuActive = false;                 // true = se esta usando un renderer acelerado de SDL
+static bool g_gpuTrial = false;                  // true = sesion de prueba con GPU (se confirma a los 30 s)
+static std::vector<std::string> g_gpuReport;     // lo que ofrece SDL en este sistema (about:bench y [gpu] en el log)
+static const char* kGpuTryPath = "/data/psbrowser/gpu_try.txt";
 static std::vector<std::pair<std::string, std::string>> g_bookmarks;  // (url, titulo)
 static const char* kCfgPath = "/data/psbrowser/config.txt";
 static const char* kBmPath = "/data/psbrowser/bookmarks.txt";
@@ -115,10 +127,13 @@ static void clampCfg() {
     g_cfg.pageW = std::max(800, std::min(1700, g_cfg.pageW));
     if (g_cfg.vdec != 2 && g_cfg.vdec != 3) g_cfg.vdec = 0;
     g_cfg.volume = std::max(0, std::min(100, g_cfg.volume));
-    if (g_cfg.vscale < 0 || g_cfg.vscale > 4) g_cfg.vscale = 0;
+    if (g_cfg.vscale < 0 || g_cfg.vscale > 4) g_cfg.vscale = 3;
+    if (g_cfg.curscale != 150 && g_cfg.curscale != 200) g_cfg.curscale = 100;
     if (g_cfg.search < 0 || g_cfg.search > 4) g_cfg.search = 0;
     if (g_cfg.ua < 0 || g_cfg.ua > 4) g_cfg.ua = 0;
     if (g_cfg.js < 0 || g_cfg.js > 2) g_cfg.js = 2;
+    if (g_cfg.gpu < 0 || g_cfg.gpu > 1) g_cfg.gpu = 0;
+    if (g_cfg.gscale < 0 || g_cfg.gscale > 2) g_cfg.gscale = 1;
     if (g_cfg.dlconn < 0 || g_cfg.dlconn > 12) g_cfg.dlconn = 8;
     g_cookiesEnabled = g_cfg.cookies;
     g_searchEngine = g_cfg.search;
@@ -132,9 +147,10 @@ static void clampCfg() {
 static void configSave() {
     FILE* f = fopen(kCfgPath, "w");
     if (!f) return;
-    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\nvscale=%d\nvpart=%d\nsearch=%d\nua=%d\nuipart=%d\njs=%d\ndlconn=%d\ncookies=%d\nadblock=%d\nsolver=%s\n",
+    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\nvscale=%d\nvpart=%d\nsearch=%d\nua=%d\nuipart=%d\ngpu=%d\ngscale=%d\njs=%d\ndlconn=%d\ncookies=%d\nadblock=%d\nsolver=%s\n",
             g_cfg.mouseSens, g_cfg.mouseAccel ? 1 : 0, g_cfg.wheelInvert ? 1 : 0, g_cfg.wheelStep, g_cfg.home.c_str(), g_cfg.dark ? 1 : 0,
-            g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume, g_cfg.vscale, g_cfg.vpart ? 1 : 0, g_cfg.search, g_cfg.ua, g_cfg.uipart ? 1 : 0, g_cfg.js, g_cfg.dlconn, g_cfg.cookies ? 1 : 0, g_cfg.adblock ? 1 : 0, g_cfg.solver.c_str());
+            g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume, g_cfg.vscale, g_cfg.vpart ? 1 : 0, g_cfg.search, g_cfg.ua, g_cfg.uipart ? 1 : 0, g_cfg.gpu, g_cfg.gscale, g_cfg.js, g_cfg.dlconn, g_cfg.cookies ? 1 : 0, g_cfg.adblock ? 1 : 0, g_cfg.solver.c_str());
+    fprintf(f, "contrast=%d\ncurscale=%d\ncfgv=%d\n", g_cfg.contrast ? 1 : 0, g_cfg.curscale, 2);
     fclose(f);
 }
 static void configLoad() {
@@ -165,13 +181,19 @@ static void configLoad() {
         else if (k == "search") g_cfg.search = atoi(v.c_str());
         else if (k == "ua") g_cfg.ua = atoi(v.c_str());
         else if (k == "uipart") g_cfg.uipart = v == "1";
+        else if (k == "gpu") g_cfg.gpu = atoi(v.c_str());
+        else if (k == "gscale") g_cfg.gscale = atoi(v.c_str());
         else if (k == "js") g_cfg.js = atoi(v.c_str());
         else if (k == "dlconn") g_cfg.dlconn = atoi(v.c_str());
         else if (k == "cookies") g_cfg.cookies = v == "1";
         else if (k == "adblock") g_cfg.adblock = v == "1";
         else if (k == "solver") g_cfg.solver = v;
+        else if (k == "contrast") g_cfg.contrast = v == "1";
+        else if (k == "curscale") g_cfg.curscale = atoi(v.c_str());
+        else if (k == "cfgv") g_cfg.cfgv = atoi(v.c_str());
     }
     fclose(f);
+    if (g_cfg.cfgv < 2) { g_cfg.vscale = 3; g_cfg.cfgv = 2; psb_log("[cfg] migracion v0.9.3: vscale=3 (1280x720, mas fps en video)"); }
     clampCfg();
 }
 static const char* kHistPath = "/data/psbrowser/history.txt";
@@ -225,11 +247,14 @@ static int bookmarkIndex(const std::string& url) {
     return -1;
 }
 // ------------------------------------------------------------------ estado global
+static Theme pickTheme() { return g_cfg.contrast ? themeContrast() : (g_cfg.dark ? themeDark() : themeLight()); }
 static Theme g_th = themeDark();
 static Canvas* g_cv = nullptr;
 static SDL_Renderer* g_ren = nullptr;
 static SDL_Texture* g_tex = nullptr;
 static SDL_Texture* g_curTex = nullptr;
+static int curW() { return 24 * g_cfg.curscale / 100; }
+static int curH() { return 34 * g_cfg.curscale / 100; }
 static int g_mx = W / 2, g_my = H / 2;
 static bool g_mouseOk = false;
 static bool g_dirty = true;
@@ -240,7 +265,7 @@ static bool g_toastBad = false;
 static void toast(const std::string& s, bool bad = false) {
     g_toast = s;
     g_toastBad = bad;
-    g_toastUntil = SDL_GetTicks() + 3500;
+    g_toastUntil = SDL_GetTicks() + static_cast<uint32_t>(std::min<size_t>(9000, 3500 + (s.size() > 40 ? (s.size() - 40) * 60 : 0)));
     g_dirty = true;
 }
 // ------------------------------------------------------------------ portapapeles interno y pestanas cerradas
@@ -521,7 +546,11 @@ static std::string genSettings() {
         "<p>Descargas - conexiones paralelas: <a href=\"psb:dlconn\">[ " + std::string(g_cfg.dlconn == 0 ? "motor antiguo (1 flujo, sin reanudar)" : std::to_string(g_cfg.dlconn) + (g_cfg.dlconn == 1 ? " (reanudable)" : " (reanudable, paralelo)")) + " ]</a> <a href=\"about:dlbench\">[ Medir descargas (red y disco) ]</a></p>"
         "<p>Cookies (sesiones y verificaciones resueltas): <a href=\"psb:cookies\">[ " + std::string(g_cfg.cookies ? "si" : "no") + " ]</a> <a href=\"about:cookies\">[ ver / importar ]</a> | Bloquear publicidad y rastreo en scripts: <a href=\"psb:adblock\">[ " + std::string(g_cfg.adblock ? "si" : "no") + " ]</a></p>"
         "<p>Captchas y verificaciones: <a href=\"about:verify\">[ ayudante del PC (F7) ]</a> " + (g_cfg.solver.empty() ? std::string("(sin configurar)") : htmlEscape(g_cfg.solver)) + "</p>"
+        "<h2>Accesibilidad</h2><p>Alto contraste (negro, texto blanco, enlaces amarillos): <a href=\"psb:contrast\">[ " + std::string(g_cfg.contrast ? "si" : "no") + " ]</a></p>"
+        "<p>Tamano del cursor del raton: <a href=\"psb:curscale\">[ " + std::to_string(g_cfg.curscale) + "% ]</a> (100, 150 o 200)</p>"
         "<p>Interfaz: repintar solo lo que cambia: <a href=\"psb:uipart\">[ " + std::string(g_cfg.uipart ? "si" : "no") + " ]</a> (si ves parpadeos o restos en pantalla, desactivalo)</p>"
+        "<h2>Renderizado (experimental)</h2><p>GPU: <a href=\"psb:gpu\">[ " + std::string(g_cfg.gpu ? "intentar renderer acelerado" : "solo software") + " ]</a> (activo ahora: " + (g_gpuActive ? "ACELERADO" : "software") + "; el cambio se aplica al reiniciar el navegador. Si tras activarlo la pantalla sale negra o se cierra, cierra la app: vuelve sola a software). <a href=\"about:bench\">[ ver lo que ofrece SDL ]</a></p>"
+        "<p>Modo juego (F2, para paginas con canvas): tamano: <a href=\"psb:gscale\">[ " + std::string(g_cfg.gscale == 0 ? "ajustar a la pantalla (lento)" : (g_cfg.gscale == 2 ? "x2 si cabe" : "1:1 centrado (rapido)")) + " ]</a></p>"
         "<p><a href=\"about:shortcuts\">[ Atajos de teclado (F1) ]</a> <a href=\"about:history\">[ Historial (Ctrl+H) ]</a></p>";
     const size_t e = out.rfind("</body>");
     out.insert(e == std::string::npos ? out.size() : e, extra);
@@ -682,8 +711,9 @@ static std::string genShortcuts() {
            "<li>Comandos en la barra de direcciones: <b>!solver IP:puerto</b> (ayudante del PC), <b>!ua dominio User-Agent</b>, <b>!cookies</b>, <b>!verify</b>, <b>!source</b>, <b>!media URL</b> (video/directo resuelto por el PC con yt-dlp).</li>"
            "<li>Clic derecho / Mayus+F10 / tecla Menu: menu contextual (copiar enlace, abrir en pestana nueva, descargar...).</li></ul>"
            "<h2>Video</h2><ul>"
-           "<li>Espacio / K: pausa. Izquierda / Derecha: -10 / +10 s. J / L: -30 / +30 s. Arriba / Abajo: volumen. Inicio: al principio. H: calidad. I: estadisticas. Esc / Q: cerrar.</li></ul>"
+           "<li>Espacio / K: pausa. Izquierda / Derecha: -10 / +10 s. J / L: -30 / +30 s. Arriba / Abajo: volumen. Inicio: al principio. H: calidad. S: tamano de imagen (720p, 540p, 1:1, pantalla; menos pixeles = mas fps). I: estadisticas. Esc / Q: cerrar.</li></ul>"
            "<h2>Diagnostico</h2><ul><li>F9: medir la velocidad de presentacion (benchmark).</li></ul>"
+           "<h2>Juegos web (canvas)</h2><ul><li>F2 (o menu contextual): modo juego, muestra el canvas de la pagina a pantalla completa; teclado, raton y mando van a la pagina.</li><li>Salir: F2 de nuevo, o mantener Options 1 s en el mando.</li></ul>"
            "<p><a href=\"about:home\">Inicio</a> | <a href=\"about:settings\">Configuracion</a></p></body></html>";
 }
 static std::string genHistory() {
@@ -703,6 +733,7 @@ static std::vector<std::string> g_bench;  // resultados de la ultima medicion de
 static std::string genBench() {
     std::string h = "<html><head><title>Velocidad de presentacion</title></head><body><h1>Velocidad de presentacion</h1>"
                     "<p>Mide cuanto tarda SDL en poner un fotograma en pantalla segun lo que se copie. <a href=\"psb:bench\">[ ejecutar la medicion (~20 s) ]</a></p>";
+    if (!g_gpuReport.empty()) { h += "<h2>Lo que ofrece SDL en este sistema</h2><ul>"; for (const std::string& l : g_gpuReport) h += "<li>" + htmlEscape(l) + "</li>"; h += "</ul>"; }
     if (g_bench.empty()) h += "<p>Aun no se ha medido.</p>";
     else { h += "<ul>"; for (const std::string& l : g_bench) h += "<li>" + htmlEscape(l) + "</li>"; h += "</ul>"; }
     h += "<p>Devuelve /data/psbrowser/log.txt (lineas [bench]) para decidir la mejora. <a href=\"about:settings\">Configuracion</a></p></body></html>";
@@ -794,6 +825,11 @@ static std::string infoHtml(const std::string& title, const std::string& msg, co
     return "<html><head><title>" + htmlEscape(title) + "</title></head><body><h1>" + htmlEscape(title) + "</h1><p>" + htmlEscape(msg) +
            "</p><p>" + htmlEscape(url) + "</p></body></html>";
 }
+// Pagina de error con la causa en claro, el detalle tecnico y un enlace para reintentar.
+static std::string errorHtml(const std::string& title, const std::string& explain, const std::string& tech, const std::string& url) {
+    return "<html><head><title>" + htmlEscape(title) + "</title></head><body><h1>" + htmlEscape(title) + "</h1><p>" + htmlEscape(explain) +
+           "</p><p><a href=\"" + htmlEscape(url) + "\">Reintentar</a></p><p>Detalle tecnico: " + htmlEscape(tech) + "</p><p>" + htmlEscape(url) + "</p></body></html>";
+}
 static bool containsCI(const std::string& s, const char* sub) {
     std::string a = s;
     for (auto& c : a) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -876,7 +912,9 @@ static void jsxHostInit() {
             if (it != g_assetCache.end() && it->second.first.size() <= maxBody) { body = it->second.first; ct = it->second.second; fin = url; status = 200; return true; }
         }
         HttpResult r;
-        if (!http_get(url, r, maxBody, 4)) { status = r.status; return false; }
+        HttpExtra ex;
+        ex.connectTimeoutMs = 6000;   // v0.9.3: scripts/CSS de terceros: un servidor muerto no congela la pagina (antes 10 s x 2 intentos)
+        if (!http_request(url, nullptr, r, maxBody, 4, nullptr, nullptr, &ex)) { status = r.status; return false; }
         body = std::move(r.body);
         fin = r.finalUrl;
         status = r.status;
@@ -889,13 +927,38 @@ static void jsxHostInit() {
         return true;
     };
     // v0.9.2: POST desde fetch()/XMLHttpRequest (las paginas de descarga piden el enlace real con un POST)
-    h.request = [](const std::string& method, const std::string& url, const std::string& reqBody, const std::string& reqCt, size_t maxBody,
+    h.request = [](const std::string& method, const std::string& url, const std::string& reqBody, const std::string& reqCt,
+                   const std::string& extraHeaders, const std::string& referer, size_t maxBody,
                    std::string& body, std::string& fin, int& status, std::string& ct) {
         if (adBlocked(url)) { body.clear(); fin = url; status = 204; ct.clear(); return true; }
         HttpResult r;
+        HttpExtra ex;
+        ex.connectTimeoutMs = 8000;
+        ex.referer = referer;
+        // Lineas "Nombre: valor" de la pagina (X-Requested-With, X-CSRF-Token...). Origin como en un navegador cuando es POST.
+        size_t pos = 0;
+        bool hasOrigin = false;
+        while (pos < extraHeaders.size() && ex.headers.size() < 24) {
+            size_t eol = extraHeaders.find('\n', pos);
+            if (eol == std::string::npos) eol = extraHeaders.size();
+            const std::string line = extraHeaders.substr(pos, eol - pos);
+            pos = eol + 1;
+            const size_t colon = line.find(':');
+            if (colon == std::string::npos || colon == 0) continue;
+            std::string val = line.substr(colon + 1);
+            while (!val.empty() && val.front() == ' ') val.erase(val.begin());
+            const std::string nm = line.substr(0, colon);
+            if (http_header_forbidden(nm)) continue;
+            if (nm == "Origin" || nm == "origin") hasOrigin = true;
+            ex.headers.push_back({nm, val});
+        }
+        if (method == "POST" && !hasOrigin) {
+            std::string sc, host, pth;
+            if (url_split(referer, sc, host, pth) && (sc == "http" || sc == "https")) ex.headers.push_back({"Origin", sc + "://" + host});
+        }
         bool ok;
-        if (method == "POST") { HttpPost p; p.body = reqBody; p.contentType = reqCt; ok = http_request(url, &p, r, maxBody, 4); }
-        else ok = http_get(url, r, maxBody, 4);
+        if (method == "POST") { HttpPost p; p.body = reqBody; p.contentType = reqCt; ok = http_request(url, &p, r, maxBody, 4, nullptr, nullptr, &ex); }
+        else ok = http_request(url, nullptr, r, maxBody, 4, nullptr, nullptr, &ex);
         status = r.status;
         if (!ok) return false;
         body = std::move(r.body);
@@ -903,6 +966,7 @@ static void jsxHostInit() {
         ct = r.contentType;
         return true;
     };
+    h.decodeImage = [](const std::string& bytes, std::vector<uint32_t>& argb, int& w, int& hh) { return imgw_decode_native(bytes, argb, w, hh); };
     jsx_set_host(h);
 }
 static void setPage(Browser& b, const std::string& url, std::string html, int kind) {
@@ -1175,12 +1239,12 @@ static bool runDownloadLegacy(const std::string& url, std::string& err) {
         else if (sink.diskError) err = "No se pudo escribir en el disco (sin espacio o sin permisos).";
         else if (sink.htmlInstead)
             err = "El servidor devolvio una pagina web en vez del archivo: el enlace puede ser temporal, exigir iniciar sesion o una verificacion "
-                  "(captcha/Cloudflare) que este navegador no puede resolver.";
+                  "(captcha/Cloudflare) que la consola no puede resolver sola: usa el ayudante (!solver).";
         else if (sink.badStatus) {
             err = "El servidor respondio HTTP " + std::to_string(sink.status) + ".";
             if (sink.status == 403 || sink.status == 429 || sink.status == 503)
-                err += " Puede exigir verificacion (Cloudflare/captcha) o iniciar sesion; este navegador no ejecuta JavaScript y no puede resolverla.";
-        } else err = "Error de red en '" + res.stage + "' (codigo " + code + ").";
+                err += " Puede exigir verificacion (Cloudflare/captcha) o iniciar sesion; la consola no la resuelve sola: usa el ayudante (!solver).";
+        } else err = neterr_explain(static_cast<unsigned>(res.sceError), res.stage) + " (paso '" + res.stage + "', codigo " + code + ")";
     }
     if (!good) {
         if (!sink.partPath.empty()) remove(sink.partPath.c_str());
@@ -1590,7 +1654,7 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
     if (!ok) {
         char code[64];
         snprintf(code, sizeof(code), "0x%08X", static_cast<unsigned>(res.sceError));
-        setPage(b, url, infoHtml("No se pudo cargar la pagina", std::string("Paso: ") + res.stage + " - codigo " + code, url), 0);
+        setPage(b, url, errorHtml("No se pudo cargar la pagina", neterr_explain(static_cast<unsigned>(res.sceError), res.stage), std::string("paso ") + res.stage + ", codigo " + code, url), 0);
         toast("Error al cargar la pagina", true);
         return;
     }
@@ -1630,6 +1694,7 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
             setPage(b, finalUrl, std::move(processed), 0);
             jsx_attach(&b);
             toast(ji.jsRan ? ("JS: " + std::to_string(ji.scripts) + " scripts" + (ji.scriptErrors ? ", " + std::to_string(ji.scriptErrors) + " con error" : "") + " (" + std::to_string(ji.ms) + " ms)") : std::string("DOM + CSS (") + std::to_string(ji.ms) + " ms)");
+            if (ji.modulesSkipped > 0 && b.doc.lines.size() < 4) toast("Pagina vacia: usa scripts de modulos ES (type=module), que esta consola aun no soporta. Prueba la version de escritorio o !solver.", true);
         } else {
             setPage(b, finalUrl, std::move(res.body), 0);
         }
@@ -1756,6 +1821,7 @@ static bool startDownload(Browser& b, const std::string& url, bool thenPlay) {
 }
 static void runBench();
 static void runDlBench(int which);
+static const char* vscaleLabel(int v) { return v == 1 ? "1:1" : (v == 2 ? "x2" : (v == 3 ? "720p" : (v == 4 ? "540p" : "Pantalla"))); }
 static bool g_vidFastPrev0 = false;  // pedir un repintado completo (bandas negras) en el siguiente fotograma de video
 static bool g_uiForceFull = true;    // el siguiente fotograma de la interfaz se sube entero (actualizacion parcial)
 // ------------------------------------------------------------------ ayudante del PC (tools/solver/psb_solver.py)
@@ -1768,7 +1834,15 @@ static std::string trimStr(const std::string& s) {
 static bool solverGet(const std::string& path, std::string& body, std::string& err) {
     if (g_cfg.solver.empty()) { err = "Falta la direccion del ayudante: escribe en la barra !solver IP:puerto"; return false; }
     HttpResult r;
-    if (!http_get("http://" + g_cfg.solver + path, r, 8 * 1024 * 1024, 0)) { err = "No se pudo conectar con " + g_cfg.solver + " (" + r.stage + "). Esta el ayudante en marcha y en la misma red?"; return false; }
+    HttpExtra ex;
+    ex.connectTimeoutMs = 4000;   // v0.9.3: un PC con el firewall cerrado ya no congela la consola 20-40 s
+    if (!http_request("http://" + g_cfg.solver + path, nullptr, r, 8 * 1024 * 1024, 0, nullptr, nullptr, &ex)) {
+        if (static_cast<unsigned>(r.sceError) == 0x80431068u)
+            err = "Tiempo agotado conectando con " + g_cfg.solver + ". Casi seguro el firewall de Windows bloquea el puerto: en el PC, PowerShell como administrador: netsh advfirewall firewall add rule name=psb_solver dir=in action=allow protocol=TCP localport=" + (g_cfg.solver.find(':') != std::string::npos ? g_cfg.solver.substr(g_cfg.solver.find(':') + 1) : std::string("8765")) + "  (y comprueba la IP del PC con ipconfig)";
+        else
+            err = "No se pudo conectar con " + g_cfg.solver + " (" + r.stage + "). Esta el ayudante en marcha y en la misma red?";
+        return false;
+    }
     if (r.status != 200) { err = "El ayudante respondio HTTP " + std::to_string(r.status); return false; }
     body = std::move(r.body);
     return true;
@@ -1885,7 +1959,7 @@ static bool handleAction(Browser& b, const std::string& a) {
     else if (a == "wheelinv") g_cfg.wheelInvert = !g_cfg.wheelInvert;
     else if (a == "wheel-") g_cfg.wheelStep--;
     else if (a == "wheel+") g_cfg.wheelStep++;
-    else if (a == "theme") { g_cfg.dark = !g_cfg.dark; g_th = g_cfg.dark ? themeDark() : themeLight(); }
+    else if (a == "theme") { g_cfg.dark = !g_cfg.dark; g_th = pickTheme(); }
     else if (a == "zoom-") { g_cfg.zoom -= 10; relay = true; }
     else if (a == "zoom+") { g_cfg.zoom += 10; relay = true; }
     else if (a == "pw-") { g_cfg.pageW -= 100; relay = true; }
@@ -1898,6 +1972,8 @@ static bool handleAction(Browser& b, const std::string& a) {
     } else if (a == "homereset") g_cfg.home.clear();
     else if (a == "quit") { quitAsk(); return true; }
     else if (a == "vdec") g_cfg.vdec = g_cfg.vdec == 0 ? 2 : (g_cfg.vdec == 2 ? 3 : 0);
+    else if (a == "contrast") { g_cfg.contrast = !g_cfg.contrast; g_th = pickTheme(); }
+    else if (a == "curscale") { g_cfg.curscale = g_cfg.curscale == 100 ? 150 : (g_cfg.curscale == 150 ? 200 : 100); g_uiForceFull = true; }
     else if (a == "vhalf") g_cfg.vhalf = !g_cfg.vhalf;
     else if (a == "search") g_cfg.search = (g_cfg.search + 1) % 5;
     else if (a == "ua") g_cfg.ua = (g_cfg.ua + 1) % 5;
@@ -1919,7 +1995,9 @@ static bool handleAction(Browser& b, const std::string& a) {
         const size_t i = static_cast<size_t>(atoi(a.c_str() + 7));
         if (i < ps.size()) dl_discard_partial(ps[i]);
         cfg = false;
-    }    else if (a == "uipart") { g_cfg.uipart = !g_cfg.uipart; g_uiForceFull = true; }
+    }    else if (a == "gscale") { g_cfg.gscale = (g_cfg.gscale + 1) % 3; }
+    else if (a == "gpu") { g_cfg.gpu = g_cfg.gpu ? 0 : 1; toast(g_cfg.gpu ? "GPU: se probara al reiniciar el navegador" : "Solo software: se aplica al reiniciar"); }
+    else if (a == "uipart") { g_cfg.uipart = !g_cfg.uipart; g_uiForceFull = true; }
     else if (a == "vpart") { g_cfg.vpart = !g_cfg.vpart; g_vidFastPrev0 = true; }
     else if (a == "bench") { runBench(); navigate(b, "about:bench", true); return true; }
     else if (a == "vol-") g_cfg.volume -= 10;
@@ -2252,11 +2330,12 @@ static RenderCtx makeRc(Browser& b) {
     }
     return rc;
 }
+static void gameEnter();  // v0.9.5: modo juego (mas abajo)
 // ------------------------------------------------------------------ menu contextual (clic derecho / tecla Menu / boton 11 del mando)
 enum CtxAct {
     CA_SEP = 0, CA_OPEN_LINK, CA_OPEN_LINK_TAB, CA_COPY_LINK, CA_DL_LINK, CA_OPEN_IMG, CA_OPEN_IMG_TAB, CA_COPY_IMG, CA_DL_IMG,
     CA_BACK, CA_FWD, CA_RELOAD, CA_COPY_URL, CA_BOOKMARK, CA_PASTE_GO, CA_EDIT_URL, CA_NEW_TAB, CA_CLOSE_TAB, CA_DUP_TAB,
-    CA_CLOSE_OTHERS, CA_REOPEN_TAB, CA_DOWNLOADS, CA_HOME, CA_BOOKMARKS, CA_VIDEOS, CA_PLAY_LINK, CA_QUIT
+    CA_CLOSE_OTHERS, CA_REOPEN_TAB, CA_DOWNLOADS, CA_HOME, CA_BOOKMARKS, CA_VIDEOS, CA_PLAY_LINK, CA_GAME, CA_QUIT
 };
 struct CtxItem { std::string label; int act; std::string arg; int tab; bool enabled; };
 struct CtxMenu {
@@ -2357,6 +2436,7 @@ static void ctxOpen(int x, int y, int forceFocus = -1) {
             ctxAdd("Guardar imagen", CA_DL_IMG, imgUrl);
             ctxSep();
         }
+        if (c2d_main()) ctxAdd("Modo juego (canvas)", CA_GAME);
         ctxAdd("Atras", CA_BACK, "", canBack);
         ctxAdd("Adelante", CA_FWD, "", canFwd);
         ctxAdd("Recargar", CA_RELOAD);
@@ -2426,6 +2506,7 @@ static void ctxRun(int i) {
         case CA_HOME: navigate(b, homeUrl(), true); break;
         case CA_VIDEOS: navigate(b, "about:videos", true); break;
         case CA_PLAY_LINK: handleAction(b, "play:" + it.arg); break;
+        case CA_GAME: gameEnter(); break;
         case CA_QUIT: quitAsk(); break;
         default: break;
     }
@@ -2666,7 +2747,7 @@ static void drawVideoUi(Canvas& cv) {
     if (vpOverlayVisible(now, vi)) {
         cv.rect(0, 0, W, 72, 0xB0000000);  // titulo
         te_draw(cv, 40, baseFor(0, 72, FONT_SANS, 24), te_fit(vi.title, W - 640, FONT_SANS, 24, true), FONT_SANS, 24, true, 0xFFFFFFFF);
-        const std::string hint = "Esc cierra   H calidad   I informacion";
+        const std::string hint = "Esc cierra   S tamano   H calidad   I informacion";
         te_draw(cv, W - 40 - te_width(hint, FONT_SANS, 18, false), baseFor(0, 72, FONT_SANS, 18), hint, FONT_SANS, 18, false, 0xFFCCCCCC);
         const int barTop = H - 176;
         cv.rect(0, barTop, W, 176, 0xB0000000);  // barra inferior
@@ -2681,11 +2762,12 @@ static void drawVideoUi(Canvas& cv) {
         te_draw(cv, bx, by + 50, tm, FONT_SANS, 20, false, 0xFFFFFFFF);
         const std::string vol = "Volumen " + std::to_string(vi.volume) + "%";
         te_draw(cv, W - 60 - te_width(vol, FONT_SANS, 20, false), by + 50, vol, FONT_SANS, 20, false, 0xFFFFFFFF);
-        const char* labels[6] = {"-10 s", vi.state == VP_PAUSED ? "Seguir" : "Pausa", "+10 s", "Vol -", "Vol +", "Cerrar"};
-        const int bwid = 132, bhei = 52, gap = 14, total = 6 * bwid + 5 * gap;
+        const std::string sizeLbl = std::string("Tam ") + vscaleLabel(g_cfg.vscale);
+        const char* labels[7] = {"-10 s", vi.state == VP_PAUSED ? "Seguir" : "Pausa", "+10 s", "Vol -", "Vol +", "Cerrar", sizeLbl.c_str()};
+        const int bwid = 132, bhei = 52, gap = 14, total = 7 * bwid + 6 * gap;
         int x = (W - total) / 2;
         const int y = barTop + 100;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 7; i++) {
             const bool hov = g_mouseOk && g_mx >= x && g_mx < x + bwid && g_my >= y && g_my < y + bhei;
             cv.rrectBorder(x, y, bwid, bhei, 10, 1, 0x66FFFFFF, hov ? th.accent : 0xCC2B2C2F);
             const int tw = te_width(labels[i], FONT_SANS, 22, false);
@@ -2711,6 +2793,12 @@ static void drawVideoUi(Canvas& cv) {
         te_draw(cv, W - tw - 60, baseFor(90, 48, FONT_SANS, 22), t, FONT_SANS, 22, false, g_toastBad ? th.bad : 0xFFFFFFFF);
     }
 }
+static void vpCycleSize() {   // 720p -> 540p -> 1:1 -> pantalla completa -> 720p (menos pixeles = mas fps)
+    g_cfg.vscale = g_cfg.vscale == 3 ? 4 : (g_cfg.vscale == 4 ? 1 : (g_cfg.vscale == 1 ? 0 : 3));
+    g_vidFastPrev0 = true;
+    configSave();
+    toast(std::string("Tamano de imagen: ") + vscaleLabel(g_cfg.vscale) + (g_cfg.vscale == 0 ? " (menos fps)" : ""));
+}
 static void videoAction(int id) {
     switch (id) {
         case 1: vp_seek_rel(-10000); break;
@@ -2719,6 +2807,7 @@ static void videoAction(int id) {
         case 4: vp_volume_rel(-10); vpVolToast(); break;
         case 5: vp_volume_rel(10); vpVolToast(); break;
         case 6: closeVideo(); break;
+        case 7: vpCycleSize(); break;
         default: break;
     }
 }
@@ -2734,19 +2823,20 @@ static void videoKey(int code) {
         case K_UP: vp_volume_rel(5); vpVolToast(); break;
         case K_DOWN: vp_volume_rel(-5); vpVolToast(); break;
         case K_HOME: vp_seek_abs(0); break;
+        case K_S: vpCycleSize(); break;
         case K_H: g_cfg.vhalf = !g_cfg.vhalf; configSave(); toast(g_cfg.vhalf ? "Calidad: media resolucion" : "Calidad: completa"); break;
         case K_I: g_vpStats = !g_vpStats; break;
         case K_ESC: case K_BACKSPACE: case K_Q: closeVideo(); break;
         default: break;
     }
 }
-static void videoPad(int button) {  // 0 pausa, 1 cierra, 2 calidad, 3 informacion, 4/5 -+30 s
+static void videoPad(int button) {  // 0 pausa, 1 cierra, 2 tamano de imagen, 3 informacion, 4/5 -+30 s
     g_vpLastAct = SDL_GetTicks();
     g_dirty = true;
     switch (button) {
         case 0: vp_pause_toggle(); break;
         case 1: closeVideo(); break;
-        case 2: g_cfg.vhalf = !g_cfg.vhalf; configSave(); toast(g_cfg.vhalf ? "Calidad: media resolucion" : "Calidad: completa"); break;
+        case 2: vpCycleSize(); break;   // v0.9.3: boton 2 del mando cambia el tamano de imagen (calidad: tecla H y Ajustes)
         case 3: g_vpStats = !g_vpStats; break;
         case 4: vp_seek_rel(-30000); break;
         case 5: vp_seek_rel(30000); break;
@@ -2857,7 +2947,7 @@ static void renderFrame() {
     // sin SDL_RenderClear: la textura cubre toda la pantalla y sin mezcla alfa, asi que limpiar antes es un relleno de 8 MB de mas
     SDL_RenderCopy(g_ren, g_tex, nullptr, nullptr);
     if (g_mouseOk && g_curTex) {
-        SDL_Rect dst = {g_mx, g_my, 12 * 2, 17 * 2};
+        SDL_Rect dst = {g_mx, g_my, curW(), curH()};
         SDL_RenderCopy(g_ren, g_curTex, nullptr, &dst);
     }
     SDL_RenderPresent(g_ren);
@@ -2946,7 +3036,7 @@ static bool presentVideoFast(uint32_t* tUp, uint32_t* tPres) {
     }
     SDL_RenderCopy(g_ren, g_vidTex, nullptr, &dst);
     if (g_mouseOk && g_curTex) {
-        SDL_Rect cd = {g_mx, g_my, 12 * 2, 17 * 2};
+        SDL_Rect cd = {g_mx, g_my, curW(), curH()};
         SDL_RenderCopy(g_ren, g_curTex, nullptr, &cd);
         const SDL_Rect c2 = clampScreen(cd);
         if (c2.w > 0 && c2.h > 0) rects[nr++] = c2;
@@ -2999,7 +3089,7 @@ static bool presentUiPartial(const uint32_t* px) {
         rects[nr++] = r;
     }
     if (g_mouseOk && g_curTex) {
-        const SDL_Rect nc = {g_mx, g_my, 12 * 2, 17 * 2};
+        const SDL_Rect nc = {g_mx, g_my, curW(), curH()};
         const bool moved = nc.x != g_uiLastCur.x || nc.y != g_uiLastCur.y;
         if (g_uiLastCur.w > 0 && (moved || top >= 0)) {
             const SDL_Rect o = clampScreen(g_uiLastCur);
@@ -3035,7 +3125,7 @@ static void present() {
         g_uiPrevValid = true;
         g_uiForceFull = false;
         g_uiLastFull = now;
-        g_uiLastCur = g_mouseOk && g_curTex ? SDL_Rect{g_mx, g_my, 12 * 2, 17 * 2} : SDL_Rect{0, 0, 0, 0};
+        g_uiLastCur = g_mouseOk && g_curTex ? SDL_Rect{g_mx, g_my, curW(), curH()} : SDL_Rect{0, 0, 0, 0};
     } else {
         g_uiPrevValid = false;
     }
@@ -3274,6 +3364,7 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
         case K_F10: if (shift) ctxOpenAtFocus(); else navigate(b, "about:settings", true); return;
         case K_F8: navigate(b, "about:videos", true); return;
         case K_F1: navigate(b, "about:shortcuts", true); return;
+        case K_F2: gameEnter(); return;
         case K_F3: if (!g_find.q.empty()) { g_find.active = true; findStep(b, shift ? -1 : 1); } return;
         case K_F9: runBench(); navigate(b, "about:bench", true); return;
         case K_APP: ctxOpenAtFocus(); return;
@@ -3360,9 +3451,293 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
     if (fi >= 0) activateFocus(b, fi);
     else if (b.editField >= 0) { b.editField = -1; g_dirty = true; }
 }
+// ---------------------------------------------------------------- modo juego (v0.9.5)
+// Muestra el canvas 2D "principal" de la pagina (el mayor en el que se ha dibujado) y manda a la pagina el teclado, el raton y el mando
+// como eventos / navigator.getGamepads(). Entrada: F2 o menu contextual. Salida: F2 o mantener Options 1 s.
+// Mapa del mando (SIN VERIFICAR en la consola): botones SDL 0-11 -> botones estandar 0-11, 12 (PS) -> 16, cruceta (hat) -> 12-15,
+// ejes 0-3 = sticks (izq X/Y, der X/Y), ejes 4-5 = L2/R2 analogicos. El log [game] imprime los botones y ejes recibidos para corregirlo.
+static bool g_game = false, g_gameFull = true, g_gameHinted = false, g_gameCurMoved = false, g_gamePadDirty = false;
+static int g_gameCid = 0, g_gameTexW = 0, g_gameTexH = 0;
+static SDL_Texture* g_gameTex = nullptr;
+static SDL_Rect g_gameDst = {0, 0, 0, 0};
+static float g_gAxes[4] = {0, 0, 0, 0}, g_gBtn[17] = {0};
+static uint32_t g_gOptAt = 0, g_gMods = 0;
+static std::vector<uint16_t> g_gKeys;
+
+static std::string jsq(const std::string& s) {  // literal de cadena JS entre comillas dobles
+    std::string o = "\"";
+    for (char c : s) { if (c == '\\' || c == '"') o += '\\'; o += c; }
+    return o + "\"";
+}
+static bool hidToJs(int hc, bool shift, std::string& key, std::string& code, int& kc) {
+    char b[24];
+    if (hc >= 4 && hc <= 29) { const char L = static_cast<char>('a' + hc - 4); key = std::string(1, shift ? static_cast<char>(L - 32) : L); snprintf(b, sizeof(b), "Key%c", static_cast<char>(L - 32)); code = b; kc = 65 + hc - 4; return true; }
+    if (hc >= 30 && hc <= 39) { const int d = hc == 39 ? 0 : hc - 29; key = std::string(1, static_cast<char>('0' + d)); snprintf(b, sizeof(b), "Digit%d", d); code = b; kc = 48 + d; return true; }
+    if (hc >= 58 && hc <= 69) { const int n = hc - 57; snprintf(b, sizeof(b), "F%d", n); key = code = b; kc = 111 + n; return true; }
+    if (hc >= 89 && hc <= 98) { const int d = hc == 98 ? 0 : hc - 88; key = std::string(1, static_cast<char>('0' + d)); snprintf(b, sizeof(b), "Numpad%d", d); code = b; kc = 96 + d; return true; }
+    static const struct { int hc; const char* key; const char* code; int kc; } T[] = {
+        {40, "Enter", "Enter", 13}, {41, "Escape", "Escape", 27}, {42, "Backspace", "Backspace", 8}, {43, "Tab", "Tab", 9}, {44, " ", "Space", 32},
+        {45, "-", "Minus", 189}, {46, "=", "Equal", 187}, {47, "[", "BracketLeft", 219}, {48, "]", "BracketRight", 221}, {49, "\\", "Backslash", 220},
+        {51, ";", "Semicolon", 186}, {52, "'", "Quote", 222}, {53, "`", "Backquote", 192}, {54, ",", "Comma", 188}, {55, ".", "Period", 190}, {56, "/", "Slash", 191},
+        {57, "CapsLock", "CapsLock", 20}, {73, "Insert", "Insert", 45}, {74, "Home", "Home", 36}, {75, "PageUp", "PageUp", 33}, {76, "Delete", "Delete", 46},
+        {77, "End", "End", 35}, {78, "PageDown", "PageDown", 34}, {79, "ArrowRight", "ArrowRight", 39}, {80, "ArrowLeft", "ArrowLeft", 37},
+        {81, "ArrowDown", "ArrowDown", 40}, {82, "ArrowUp", "ArrowUp", 38}};
+    for (const auto& t : T) if (t.hc == hc) { key = t.key; code = t.code; kc = t.kc; return true; }
+    return false;
+}
+static void gameKey(bool down, const std::string& key, const std::string& code, int kc) {
+    char b[48];
+    snprintf(b, sizeof(b), "__psbKey(%d,", down ? 1 : 0);
+    jsx_eval(&B, std::string(b) + jsq(key) + "," + jsq(code) + "," + std::to_string(kc) + ")");
+}
+static void gameKeys(const std::vector<uint16_t>& cur, uint32_t mods);
+static void gameExit() {
+    if (!g_game) return;
+    for (uint16_t k : g_gKeys) { std::string key, code; int kc = 0; if (hidToJs(k, false, key, code, kc)) gameKey(false, key, code, kc); }
+    g_gKeys.clear();
+    jsx_eval(&B, "__psbPadOff()");
+    g_game = false;
+    jsx_set_game_mode(false);
+    if (g_gameTex) { SDL_DestroyTexture(g_gameTex); g_gameTex = nullptr; }
+    g_gameTexW = g_gameTexH = 0;
+    g_dirty = true;
+    g_uiForceFull = true;
+    psb_log("[game] modo juego OFF");
+}
+static void gameEnter() {
+    if (g_game) return;
+    if (g_vpMode) { toast("Cierra el video antes de usar el modo juego", true); return; }
+    const int id = c2d_main();
+    if (!id) { toast("Esta pagina todavia no ha dibujado en ningun canvas", true); return; }
+    int w = 0, h = 0;
+    c2d_info(id, w, h, nullptr);
+    g_game = true; g_gameCid = id; g_gameFull = true; g_gameTexW = g_gameTexH = 0; g_gMods = 0; g_gOptAt = 0;
+    g_gKeys.clear();
+    std::fill(g_gBtn, g_gBtn + 17, 0.0f); std::fill(g_gAxes, g_gAxes + 4, 0.0f);
+    g_gamePadDirty = true;
+    g_ctx.open = false;
+    jsx_set_game_mode(true);
+    psb_log("[game] modo juego ON: canvas %d (%dx%d), tamano=%d, raton=%s", id, w, h, g_cfg.gscale, g_mouseOk ? "si" : "no");
+}
+static bool gameEvent(const SDL_Event& e, uint32_t now) {  // true = el evento es del mando y ya esta tratado
+    static int lg = 0;
+    switch (e.type) {
+        case SDL_JOYBUTTONDOWN: case SDL_JOYBUTTONUP: {
+            const bool down = e.type == SDL_JOYBUTTONDOWN;
+            const int b = e.jbutton.button;
+            if (lg < 80) { lg++; psb_log("[game] boton %d %s", b, down ? "abajo" : "arriba"); }
+            const int idx = b <= 11 ? b : (b == 12 ? 16 : -1);
+            if (idx >= 0) { g_gBtn[idx] = down ? 1.0f : 0.0f; g_gamePadDirty = true; }
+            if (b == 9) g_gOptAt = down ? now : 0;
+            return true;
+        }
+        case SDL_JOYHATMOTION: {
+            const int v = e.jhat.value;
+            if (lg < 80) { lg++; psb_log("[game] hat %d", v); }
+            g_gBtn[12] = (v & SDL_HAT_UP) ? 1.0f : 0.0f; g_gBtn[13] = (v & SDL_HAT_DOWN) ? 1.0f : 0.0f;
+            g_gBtn[14] = (v & SDL_HAT_LEFT) ? 1.0f : 0.0f; g_gBtn[15] = (v & SDL_HAT_RIGHT) ? 1.0f : 0.0f;
+            g_gamePadDirty = true;
+            return true;
+        }
+        case SDL_JOYAXISMOTION: {
+            const int a = e.jaxis.axis;
+            float v = e.jaxis.value / 32767.0f;
+            if (lg < 80 && std::fabs(v) > 0.5f) { lg++; psb_log("[game] eje %d = %d", a, e.jaxis.value); }
+            if (a >= 0 && a <= 3) { if (std::fabs(v) < 0.12f) v = 0.0f; g_gAxes[a] = std::max(-1.0f, std::min(1.0f, v)); g_gamePadDirty = true; }
+            else if (a == 4 || a == 5) { g_gBtn[a == 4 ? 6 : 7] = std::max(0.0f, std::min(1.0f, (v + 1.0f) / 2.0f)); g_gamePadDirty = true; }
+            return true;
+        }
+        default: return false;
+    }
+}
+static void gameKeys(const std::vector<uint16_t>& cur, uint32_t mods) {
+    static const struct { uint32_t m; const char* key; const char* code; int kc; } M[] = {
+        {ORBIS_KEYBOARD_MOD_LEFT_SHIFT, "Shift", "ShiftLeft", 16}, {ORBIS_KEYBOARD_MOD_RIGHT_SHIFT, "Shift", "ShiftRight", 16},
+        {ORBIS_KEYBOARD_MOD_LEFT_CTRL, "Control", "ControlLeft", 17}, {ORBIS_KEYBOARD_MOD_RIGHT_CTRL, "Control", "ControlRight", 17},
+        {ORBIS_KEYBOARD_MOD_LEFT_ALT, "Alt", "AltLeft", 18}, {ORBIS_KEYBOARD_MOD_RIGHT_ALT, "Alt", "AltRight", 18}};
+    for (const auto& m : M) {
+        const bool now = (mods & m.m) != 0, was = (g_gMods & m.m) != 0;
+        if (now != was) gameKey(now, m.key, m.code, m.kc);
+    }
+    g_gMods = mods;
+    const bool shift = (mods & (ORBIS_KEYBOARD_MOD_LEFT_SHIFT | ORBIS_KEYBOARD_MOD_RIGHT_SHIFT)) != 0;
+    for (uint16_t k : cur) {
+        if (std::find(g_gKeys.begin(), g_gKeys.end(), k) != g_gKeys.end()) continue;
+        if (k == K_F2) { gameExit(); return; }  // F2 = salir (no se manda a la pagina)
+        g_gKeys.push_back(k);
+        std::string key, code; int kc = 0;
+        if (hidToJs(k, shift, key, code, kc)) gameKey(true, key, code, kc);
+    }
+    for (size_t i = 0; i < g_gKeys.size();) {
+        const uint16_t k = g_gKeys[i];
+        if (std::find(cur.begin(), cur.end(), k) != cur.end()) { i++; continue; }
+        std::string key, code; int kc = 0;
+        if (hidToJs(k, shift, key, code, kc)) gameKey(false, key, code, kc);
+        g_gKeys.erase(g_gKeys.begin() + static_cast<long>(i));
+    }
+}
+static void gameMouse(const PsMouseState& ms) {
+    static float fx = 0, fy = 0;
+    static uint32_t prev = 0;
+    int w = 0, h = 0;
+    if (!c2d_info(g_gameCid, w, h, nullptr) || g_gameDst.w <= 0 || g_gameDst.h <= 0) return;
+    char b[160];
+    auto cvx = [&]() { return static_cast<int>((static_cast<int64_t>(g_mx) - g_gameDst.x) * w / g_gameDst.w); };
+    auto cvy = [&]() { return static_cast<int>((static_cast<int64_t>(g_my) - g_gameDst.y) * h / g_gameDst.h); };
+    if (ms.dx || ms.dy) {
+        fx += ms.dx * g_cfg.mouseSens; fy += ms.dy * g_cfg.mouseSens;
+        const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+        fx -= ix; fy -= iy;
+        g_mx = std::max(g_gameDst.x, std::min(g_gameDst.x + g_gameDst.w - 1, g_mx + ix));  // el cursor no sale del canvas (no deja rastro en las bandas)
+        g_my = std::max(g_gameDst.y, std::min(g_gameDst.y + g_gameDst.h - 1, g_my + iy));
+        g_gameCurMoved = true;
+        snprintf(b, sizeof(b), "__psbMouse(\"mousemove\",%d,%d,0,%d)", cvx(), cvy(), g_gameCid);
+        jsx_eval(&B, b);
+    }
+    static const struct { uint32_t bit; int btn; } MB[] = {{1, 0}, {4, 1}, {2, 2}};
+    for (const auto& m : MB) {
+        const bool now = (ms.buttons & m.bit) != 0, was = (prev & m.bit) != 0;
+        if (now == was) continue;
+        snprintf(b, sizeof(b), "__psbMouse(\"%s\",%d,%d,%d,%d)", now ? "mousedown" : "mouseup", cvx(), cvy(), m.btn, g_gameCid);
+        jsx_eval(&B, b);
+        if (!now && m.btn == 0) { snprintf(b, sizeof(b), "__psbMouse(\"click\",%d,%d,0,%d)", cvx(), cvy(), g_gameCid); jsx_eval(&B, b); }
+    }
+    prev = ms.buttons;
+}
+static void gameTick(uint32_t now) {
+    if (g_gOptAt && now - g_gOptAt > 1000) { g_gOptAt = 0; gameExit(); return; }  // mantener Options 1 s = salir
+    if (g_gamePadDirty) {
+        g_gamePadDirty = false;
+        std::string js = "__psbPad([";
+        char b[24];
+        for (int i = 0; i < 4; i++) { snprintf(b, sizeof(b), "%s%.3f", i ? "," : "", g_gAxes[i]); js += b; }
+        js += "],[";
+        for (int i = 0; i < 17; i++) { snprintf(b, sizeof(b), "%s%.3f", i ? "," : "", g_gBtn[i]); js += b; }
+        js += "])";
+        jsx_eval(&B, js);
+    }
+}
+static void gamePresent() {
+    const int id = c2d_main();
+    if (id && id != g_gameCid) { g_gameCid = id; g_gameFull = true; }
+    int w = 0, h = 0;
+    const uint32_t* px = nullptr;
+    if (!c2d_info(g_gameCid, w, h, &px) || !px) return;
+    bool forceUp = false;
+    if (!g_gameTex || g_gameTexW != w || g_gameTexH != h) {
+        if (g_gameTex) SDL_DestroyTexture(g_gameTex);
+        g_gameTex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, w, h);
+        if (!g_gameTex) { psb_log("[game] no se pudo crear la textura %dx%d: %s", w, h, SDL_GetError()); toast("No se pudo mostrar el canvas", true); gameExit(); return; }
+        g_gameTexW = w; g_gameTexH = h; g_gameFull = true; forceUp = true;
+        psb_log("[game] textura del canvas %dx%d", w, h);
+    }
+    const bool dirty = c2d_take_dirty(g_gameCid) || forceUp;
+    if (!dirty && !g_gameFull && !g_gameCurMoved) return;
+    int dw = w, dh = h;
+    if (g_cfg.gscale == 2 && w * 2 <= W && h * 2 <= H) { dw = w * 2; dh = h * 2; }
+    else if (g_cfg.gscale == 0 || w > W || h > H) {
+        dw = W; dh = H;
+        if (static_cast<int64_t>(W) * h > static_cast<int64_t>(H) * w) dw = static_cast<int>(static_cast<int64_t>(H) * w / h);
+        else dh = static_cast<int>(static_cast<int64_t>(W) * h / w);
+    }
+    const SDL_Rect dst = {(W - dw) / 2, (H - dh) / 2, dw, dh};
+    if (dst.x != g_gameDst.x || dst.y != g_gameDst.y || dst.w != g_gameDst.w || dst.h != g_gameDst.h) {
+        g_gameDst = dst; g_gameFull = true;
+        g_mx = std::max(dst.x, std::min(dst.x + dst.w - 1, g_mx)); g_my = std::max(dst.y, std::min(dst.y + dst.h - 1, g_my));
+    }
+    if (dirty) SDL_UpdateTexture(g_gameTex, nullptr, px, w * 4);
+    if (g_gameFull) { SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 255); SDL_RenderClear(g_ren); }
+    SDL_RenderCopy(g_ren, g_gameTex, nullptr, &g_gameDst);
+    if (g_mouseOk && g_curTex) { SDL_Rect cd = {g_mx, g_my, curW(), curH()}; SDL_RenderCopy(g_ren, g_curTex, nullptr, &cd); }
+    SDL_RenderPresent(g_ren);
+    g_gameFull = false; g_gameCurMoved = false;
+}
+
+// ---------------------------------------------------------------- renderer (v0.9.5): sondeo de lo que ofrece SDL + GPU opcional
+// Por defecto (gpu=0) NO cambia nada respecto a v0.9.4: renderer por software. El sondeo solo LEE (lista de controladores de video y de
+// render) y lo deja en el log como [gpu]. Con gpu=1 se prueba un renderer ACELERADO solo si SDL declara alguno (flag ACCELERATED); si
+// no hay ninguno no se intenta nada. Proteccion: antes de intentarlo se escribe gpu_try.txt; si la app se cierra antes de 30 s (pantalla
+// negra, cuelgue, cierre del usuario), el siguiente arranque desactiva gpu solo y vuelve a software.
+static void gpuLog(const char* fmt, ...) {
+    char l[300];
+    va_list ap; va_start(ap, fmt); vsnprintf(l, sizeof(l), fmt, ap); va_end(ap);
+    g_gpuReport.push_back(l);
+    psb_log("[gpu] %s", l);
+}
+static SDL_Renderer* createRenderer(SDL_Window* win) {
+    // 1) sesion anterior con GPU que no llego a los 30 s: volver a software
+    if (FILE* f = fopen(kGpuTryPath, "r")) {
+        char buf[16] = {0};
+        const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        remove(kGpuTryPath);
+        if (n > 0 && g_cfg.gpu) {
+            g_cfg.gpu = 0; configSave();
+            gpuLog("la sesion anterior con GPU termino antes de 30 s (pantalla negra, cuelgue o cierre): gpu vuelve a 0 (software)");
+        }
+    }
+    // 2) sondeo (solo lectura)
+    const int nvd = SDL_GetNumVideoDrivers();
+    const char* cur = SDL_GetCurrentVideoDriver();
+    gpuLog("controladores de video: %d (actual: %s)", nvd, cur ? cur : "?");
+    for (int i = 0; i < nvd; i++) { const char* n = SDL_GetVideoDriver(i); gpuLog("  video[%d] = %s", i, n ? n : "?"); }
+    const int nrd = SDL_GetNumRenderDrivers();
+    gpuLog("controladores de render: %d", nrd);
+    int accelIdx = -1;
+    for (int i = 0; i < nrd; i++) {
+        SDL_RendererInfo ri;
+        std::memset(&ri, 0, sizeof(ri));
+        if (SDL_GetRenderDriverInfo(i, &ri) != 0) { gpuLog("  render[%d]: sin informacion (%s)", i, SDL_GetError()); continue; }
+        gpuLog("  render[%d] = %s | flags 0x%x (%s%s) | textura max %dx%d", i, ri.name ? ri.name : "?", static_cast<unsigned>(ri.flags),
+               (ri.flags & SDL_RENDERER_SOFTWARE) ? "SOFTWARE " : "", (ri.flags & SDL_RENDERER_ACCELERATED) ? "ACELERADO" : "",
+               ri.max_texture_width, ri.max_texture_height);
+        if (accelIdx < 0 && (ri.flags & SDL_RENDERER_ACCELERATED)) accelIdx = i;
+    }
+    SDL_Renderer* r = nullptr;
+    // 3) intento acelerado (solo si el usuario lo pidio Y SDL ofrece uno)
+    if (g_cfg.gpu) {
+        if (accelIdx < 0) {
+            gpuLog("gpu=1 pero SDL no declara ningun renderer acelerado: se queda en software (esto ya responde la pregunta: en este SDL no hay camino GPU)");
+        } else {
+            if (FILE* f = fopen(kGpuTryPath, "w")) { fputs("trying\n", f); fclose(f); }
+            gpuLog("intentando renderer acelerado [%d]...", accelIdx);
+            r = SDL_CreateRenderer(win, accelIdx, SDL_RENDERER_ACCELERATED);
+            if (!r) {
+                gpuLog("fallo al crear el renderer acelerado: %s", SDL_GetError());
+                remove(kGpuTryPath);
+            } else {
+                // prueba rapida: textura de pantalla completa y 20 copias + Present
+                SDL_Texture* t = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, W, H);
+                if (!t) {
+                    gpuLog("el renderer acelerado no pudo crear la textura %dx%d (%s): se descarta", W, H, SDL_GetError());
+                    SDL_DestroyRenderer(r); r = nullptr; remove(kGpuTryPath);
+                } else {
+                    const uint32_t t0 = SDL_GetTicks();
+                    for (int i = 0; i < 20; i++) { SDL_RenderCopy(r, t, nullptr, nullptr); SDL_RenderPresent(r); SDL_PumpEvents(); }
+                    const uint32_t dt = std::max<uint32_t>(1, SDL_GetTicks() - t0);
+                    gpuLog("renderer ACELERADO activo: copia %dx%d + Present = %.1f ms por fotograma", W, H, dt / 20.0);
+                    SDL_DestroyTexture(t);
+                    g_gpuActive = true; g_gpuTrial = true;
+                    g_partFailed = true;  // SDL_UpdateWindowSurfaceRects no se puede usar junto a un renderer acelerado
+                }
+            }
+        }
+    }
+    // 4) software (como siempre)
+    if (!r) {
+        r = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
+        gpuLog("renderer por software: %s", r ? "ok" : SDL_GetError());
+    }
+    if (r) {
+        SDL_RendererInfo ri;
+        std::memset(&ri, 0, sizeof(ri));
+        if (SDL_GetRendererInfo(r, &ri) == 0) gpuLog("renderer en uso: %s | flags 0x%x | textura max %dx%d", ri.name ? ri.name : "?", static_cast<unsigned>(ri.flags), ri.max_texture_width, ri.max_texture_height);
+    }
+    return r;
+}
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.9.2 (DOM+CSS+JS) ==");
+    psb_log("== psbrowser v0.9.5 (DOM+CSS+JS+Canvas2D+GPU probe) ==");
     psb_log("[jsx] motor JS: %s | js=%d uipart=%d", jsx_has_engine() ? "QuickJS" : "no incluido", g_cfg.js, g_cfg.uipart ? 1 : 0);
     configLoad();
     cookies_load();
@@ -3372,7 +3747,7 @@ int main(int, char**) {
     historyLoad();
     clampCfg();  // aplica el buscador y el User-Agent guardados
     dlListLoad();
-    g_th = g_cfg.dark ? themeDark() : themeLight();
+    g_th = pickTheme();
     if (!te_init()) { psb_log("te_init FALLO (fuentes)"); return 1; }
     SDL_Init(0);
     const struct { Uint32 f; const char* n; } subs[] = {{SDL_INIT_VIDEO, "VIDEO"}, {SDL_INIT_JOYSTICK, "JOYSTICK"}, {SDL_INIT_EVENTS, "EVENTS"}};
@@ -3382,7 +3757,7 @@ int main(int, char**) {
     }
     SDL_Window* win = SDL_CreateWindow("psbrowser", 0, 0, W, H, 0);
     g_win = win;
-    g_ren = win ? SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE) : nullptr;
+    g_ren = win ? createRenderer(win) : nullptr;
     if (!g_ren) { psb_log("sin renderer: %s", SDL_GetError()); return 1; }
     g_tex = SDL_CreateTexture(g_ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, W, H);
     if (!g_tex) { psb_log("sin textura: %s", SDL_GetError()); return 1; }
@@ -3414,11 +3789,13 @@ int main(int, char**) {
     while (running) {
         frames++;
         const uint32_t now = SDL_GetTicks();
+        if (g_gpuTrial && now > 30000) { g_gpuTrial = false; remove(kGpuTryPath); psb_log("[gpu] prueba de 30 s superada: se mantiene el renderer acelerado"); }
         const float dt = static_cast<float>(std::max<uint32_t>(1, std::min<uint32_t>(100, now - lastNow)));
         lastNow = now;
         bool moved = false;
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            if (g_game && gameEvent(e, now)) continue;  // v0.9.5: en modo juego el mando va a la pagina
             switch (e.type) {
                 case SDL_QUIT: running = false; break;
                 case SDL_JOYBUTTONDOWN:
@@ -3513,6 +3890,11 @@ int main(int, char**) {
             g_modCtrl = (mods & ORBIS_KEYBOARD_MOD_LEFT_CTRL) != 0;
             g_modAlt = (mods & ORBIS_KEYBOARD_MOD_LEFT_ALT) != 0;
             g_modShift = (mods & ORBIS_KEYBOARD_MOD_LEFT_SHIFT) != 0;
+            if (g_game) {  // modo juego: el teclado va a la pagina (y 'held' sigue el estado para que al salir no se repita nada)
+                gameKeys(cur, mods);
+                held.clear();
+                for (uint16_t k : cur) held.push_back({k, now, now});
+            } else {
             for (uint16_t k : cur) {
                 auto it = std::find_if(held.begin(), held.end(), [k](const Held& h) { return h.code == k; });
                 if (it == held.end()) {
@@ -3526,6 +3908,7 @@ int main(int, char**) {
             held.erase(std::remove_if(held.begin(), held.end(),
                                       [&cur](const Held& h) { return std::find(cur.begin(), cur.end(), h.code) == cur.end(); }),
                        held.end());
+            }
         }
         // Raton nativo (se inicializa tras unos frames para que la pantalla arranque aunque falle).
         if (!mouseTried && frames > 30) {
@@ -3536,6 +3919,7 @@ int main(int, char**) {
         if (g_mouseOk) {
             PsMouseState ms;
             if (psmouse_poll(&ms)) {
+                if (g_game) { gameMouse(ms); ms.dx = ms.dy = ms.wheel = 0; ms.buttons = 0; prevButtons = 0; }  // v0.9.5: el raton va a la pagina
                 if (ms.dx || ms.dy) {
                     float gain = g_cfg.mouseSens;
                     if (g_cfg.mouseAccel) {  // movimientos rapidos (muchas cuentas por lectura) avanzan mas
@@ -3624,6 +4008,11 @@ int main(int, char**) {
                 if (ov && now - lastClk > 250) { lastClk = now; g_dirty = true; }
             }
         }
+        if (g_game) {  // v0.9.5: modo juego
+            if (!c2d_main()) gameExit();  // la pagina cambio (los canvas ya no existen)
+            else { gameTick(now); if (g_game) gamePresent(); SDL_Delay(2); continue; }
+        } else if (c2d_used_count() == 0) g_gameHinted = false;
+        else if (!g_gameHinted && !g_vpMode && c2d_main()) { g_gameHinted = true; toast("Esta pagina dibuja en un canvas (juego?): F2 = modo juego"); }
         uint32_t fUp = 0, fPres = 0;
         const uint32_t fT0 = SDL_GetTicks();
         if (g_dirty && vpCleanPlayback(now) && presentVideoFast(&fUp, &fPres)) {
