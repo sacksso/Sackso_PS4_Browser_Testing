@@ -17,6 +17,9 @@ struct HttpResult {
     std::string contentDisposition;  // cabecera Content-Disposition (nombre de archivo en descargas)
     long long received = 0;   // bytes entregados a un HttpSink
     long long rangeTotal = -1;  // tamano total del archivo segun 'Content-Range: bytes a-b/TOTAL' (respuestas 206), -1 si no hay
+    int retryAfterMs = 0;     // cabecera Retry-After (segundos) de un 429/503, en ms; 0 = no vino
+    std::string server;       // cabecera Server (p. ej. cloudflare)
+    bool cfChallenge = false; // cabecera 'cf-mitigated: challenge' (verificacion de Cloudflare)
     std::string body;
 };
 

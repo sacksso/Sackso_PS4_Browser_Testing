@@ -170,7 +170,7 @@ class Element extends Node {
       get length() { return tok().length; }, get value() { return el.className; }, toString: () => el.className, forEach: f => tok().forEach(f), [Symbol.iterator]: () => tok()[Symbol.iterator](),
     };
   }
-  get attributes() { return D.attrNames(this.__id).map(n => ({ name: n, value: D.getAttr(this.__id, n), nodeName: n, nodeValue: D.getAttr(this.__id, n) })); }
+  get attributes() { const a = D.attrNames(this.__id).map(n => ({ name: n, value: D.getAttr(this.__id, n), nodeName: n, nodeValue: D.getAttr(this.__id, n), specified: true, expando: false })); for (const x of a) if (!(x.name in a)) a[x.name] = x; a.getNamedItem = k => a[String(k).toLowerCase()] || null; a.item = i => a[i] || null; return a; }
   getAttribute(n) { const v = D.getAttr(this.__id, String(n).toLowerCase()); return v === undefined ? null : v; }
   setAttribute(n, v) { D.setAttr(this.__id, String(n), String(v)); }
   removeAttribute(n) { D.rmAttr(this.__id, String(n)); }
@@ -251,8 +251,8 @@ class Document extends Node {
   get compatMode() { return 'CSS1Compat'; } get hidden() { return false; } get visibilityState() { return 'visible'; }
   get activeElement() { return this.body; } get scrollingElement() { return this.documentElement; } get defaultView() { return G; }
   get currentScript() { return wrap(D.currentScript()); }
-  get cookie() { return Object.keys(this.__cookies).map(k => k + '=' + this.__cookies[k]).join('; '); }
-  set cookie(v) { const p = String(v).split(';')[0]; const i = p.indexOf('='); if (i > 0) this.__cookies[p.slice(0, i).trim()] = p.slice(i + 1).trim(); }
+  get cookie() { const r = N.cookieGet(); if (r !== null) return r; return Object.keys(this.__cookies).map(k => k + '=' + this.__cookies[k]).join('; '); }
+  set cookie(v) { if (N.cookieGet() !== null) { N.cookieSet(String(v)); return; } const p = String(v).split(';')[0]; const i = p.indexOf('='); if (i > 0) this.__cookies[p.slice(0, i).trim()] = p.slice(i + 1).trim(); }
   get forms() { return this.querySelectorAll('form'); } get images() { return this.querySelectorAll('img'); } get links() { return this.querySelectorAll('a[href]'); } get scripts() { return this.querySelectorAll('script'); }
   get styleSheets() { return []; } get fonts() { return { ready: Promise.resolve(), load() { return Promise.resolve([]); }, check() { return true; }, addEventListener() {} }; }
   hasFocus() { return true; }
@@ -274,6 +274,48 @@ class Document extends Node {
 const document = new Document();
 cache.set(docId, document);
 G.document = document;
+
+// ---- compatibilidad v0.9.1: documentos desligados (jQuery, DOMParser), globales que piden las bibliotecas habituales
+class HTMLDocumentLite {
+  constructor(title) {
+    const html = document.createElement('html'), head = document.createElement('head'), body = document.createElement('body');
+    html.appendChild(head); html.appendChild(body);
+    if (title) { const t = document.createElement('title'); t.textContent = String(title); head.appendChild(t); }
+    Object.defineProperty(this, '__html', { value: html });
+    this.documentElement = html; this.head = head; this.body = body;
+    this.readyState = 'complete'; this.contentType = 'text/html'; this.compatMode = 'CSS1Compat'; this.characterSet = 'UTF-8';
+  }
+  get nodeType() { return 9; } get nodeName() { return '#document'; } get ownerDocument() { return null; } get defaultView() { return null; }
+  get location() { return G.location; } get URL() { return G.location.href; } get baseURI() { return G.location.href; }
+  get childNodes() { return [this.__html]; } get firstChild() { return this.__html; } get children() { return [this.__html]; }
+  get title() { const t = this.__html.querySelector('title'); return t ? t.textContent : ''; }
+  createElement(t) { return document.createElement(t); } createElementNS(n, t) { return document.createElement(t); }
+  createTextNode(s) { return document.createTextNode(s); } createComment(s) { return document.createComment(s); } createDocumentFragment() { return document.createDocumentFragment(); }
+  getElementById(i) { return this.__html.querySelector('[id="' + String(i).replace(/"/g, '') + '"]'); }
+  getElementsByTagName(t) { return this.__html.querySelectorAll(t); } getElementsByClassName(c) { return this.__html.querySelectorAll(String(c).trim().split(/\s+/).map(x => '.' + x).join('')); }
+  querySelector(s) { return this.__html.querySelector(s); } querySelectorAll(s) { return this.__html.querySelectorAll(s); }
+  contains(n) { return this.__html.contains(n); } importNode(n, d) { return n.cloneNode(!!d); } adoptNode(n) { return n; }
+  addEventListener() {} removeEventListener() {} dispatchEvent() { return true; } hasFocus() { return false; }
+}
+const DOMIMPL = { createHTMLDocument: t => new HTMLDocumentLite(t), createDocument: () => new HTMLDocumentLite(''), createDocumentType: () => ({}), hasFeature: () => true };
+Object.defineProperty(Document.prototype, 'implementation', { get() { return DOMIMPL; }, configurable: true });
+Object.defineProperty(HTMLDocumentLite.prototype, 'implementation', { get() { return DOMIMPL; }, configurable: true });
+G.DOMParser = class DOMParser { parseFromString(s, t) { const d = new HTMLDocumentLite(''); d.body.innerHTML = String(s); return d; } };
+class NodeList extends Array { static [Symbol.hasInstance](o) { return Array.isArray(o); } }
+G.NodeList = NodeList; G.HTMLCollection = NodeList; G.NamedNodeMap = NodeList;
+G.ShadowRoot = class ShadowRoot extends DocumentFragment {};
+Object.defineProperty(Element.prototype, 'shadowRoot', { get() { return null; }, configurable: true });
+G.MediaError = class MediaError { constructor() { this.code = 0; this.message = ''; } };
+Object.assign(G.MediaError, { MEDIA_ERR_ABORTED: 1, MEDIA_ERR_NETWORK: 2, MEDIA_ERR_DECODE: 3, MEDIA_ERR_SRC_NOT_SUPPORTED: 4 });
+for (const n of ['CSSStyleDeclaration', 'DOMTokenList', 'Range', 'Selection', 'DOMRect', 'TimeRanges', 'TextTrack', 'MediaSource', 'SourceBuffer', 'RTCPeerConnection', 'MediaStream', 'Notification']) if (!G[n]) G[n] = ({ [n]: class {} })[n];
+G.Notification = undefined; G.MediaSource = undefined; G.RTCPeerConnection = undefined;  // las bibliotecas comprueban su existencia para decidir si las usan
+for (const n of ['PointerEvent', 'WheelEvent', 'TouchEvent', 'FocusEvent', 'InputEvent', 'ErrorEvent', 'MessageEvent', 'HashChangeEvent', 'PopStateEvent', 'ProgressEvent', 'TransitionEvent', 'AnimationEvent', 'ClipboardEvent', 'DragEvent', 'StorageEvent']) if (!G[n]) G[n] = ({ [n]: class extends MouseEvent {} })[n];
+G.crypto = {
+  getRandomValues(a) { const m = Math.pow(2, 8 * (a.BYTES_PER_ELEMENT || 1)); for (let i = 0; i < a.length; i++) a[i] = Math.floor(Math.random() * m); return a; },
+  randomUUID() { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }); },
+  subtle: undefined };
+G.TextEncoder = class TextEncoder { get encoding() { return 'utf-8'; } encode(s) { const e = unescape(encodeURIComponent(String(s === undefined ? '' : s))); const u = new Uint8Array(e.length); for (let i = 0; i < e.length; i++) u[i] = e.charCodeAt(i); return u; } };
+G.TextDecoder = class TextDecoder { constructor(l) { this.encoding = l || 'utf-8'; } decode(b) { if (!b) return ''; const u = b instanceof ArrayBuffer ? new Uint8Array(b) : new Uint8Array(b.buffer || b, b.byteOffset || 0, b.byteLength); let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); try { return decodeURIComponent(escape(s)); } catch (e) { return s; } } };
 G.Node = Node; G.Element = Element; G.HTMLElement = Element; G.Text = Text; G.Comment = Comment; G.Document = Document; G.DocumentFragment = DocumentFragment;
 G.EventTarget = EventTarget; G.Event = Event; G.CustomEvent = CustomEvent; G.MouseEvent = MouseEvent; G.KeyboardEvent = KeyboardEvent; G.UIEvent = UIEvent; G.DOMException = DOMException;
 for (const n of ['HTMLDivElement', 'HTMLSpanElement', 'HTMLAnchorElement', 'HTMLImageElement', 'HTMLInputElement', 'HTMLButtonElement', 'HTMLFormElement', 'HTMLCanvasElement', 'HTMLScriptElement', 'HTMLStyleElement', 'HTMLVideoElement', 'HTMLAudioElement', 'HTMLSelectElement', 'HTMLTextAreaElement', 'HTMLBodyElement', 'HTMLIFrameElement', 'SVGElement']) G[n] = Element;

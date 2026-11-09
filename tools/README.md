@@ -69,3 +69,15 @@ g++ -std=c++17 -fsyntax-only -DPSB_NO_JS -Iapp app/jsx.cpp
 g++ -std=c++17 -pthread -g -O1 -fsanitize=address,undefined -Itools/stubs -Iapp tools/tests/test_dlengine.cpp app/dlengine.cpp app/asyncwriter.cpp -o /tmp/test_dl && /tmp/test_dl
 g++ -std=c++17 -pthread -g -O1 -fsanitize=thread           -Itools/stubs -Iapp tools/tests/test_dlengine.cpp app/dlengine.cpp app/asyncwriter.cpp -o /tmp/test_dl_tsan && /tmp/test_dl_tsan
 ```
+
+
+# v0.9.1
+```
+# compatibilidad JS con jQuery real (npm install jquery@3.7.1 en una carpeta aparte)
+g++ -std=c++17 -g -O1 -pthread -I/tmp/qjs -Iapp tools/tests/test_jsx_compat.cpp app/jsx.cpp app/dom.cpp /tmp/qobj/*.o -lm -o /tmp/test_compat && /tmp/test_compat node_modules/jquery/dist/jquery.min.js
+# cookies
+g++ -std=c++17 -g -Wall -Wextra -fsanitize=address,undefined -Iapp tools/tests/test_cookies.cpp app/cookies.cpp -o /tmp/test_cookies && /tmp/test_cookies
+# netclient ahora necesita cookies.cpp
+g++ -std=c++17 -fsanitize=address,undefined -Itools/stubs -Iapp tools/tests/test_netclient_mock.cpp app/netclient.cpp app/cookies.cpp app/inflate.cpp app/charset.cpp -o /tmp/test_nc
+# ayudante del PC sin navegador: python3 tools/solver/psb_solver.py --fake --bind 127.0.0.1 ; curl 127.0.0.1:8765/state > e.txt ; test_solver_state e.txt https://www.ejemplo.test/
+```

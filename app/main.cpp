@@ -41,6 +41,7 @@
 #include "mouse.h"
 #include "osk.h"
 #include "netclient.h"
+#include "cookies.h"
 #include "pagerender.h"
 #include "textengine.h"
 #include "theme.h"
@@ -74,7 +75,7 @@ static const int VIEW_H = H - VIEW_Y;
 // Codigos de tecla USB HID (los mismos que usa OpenOrbis en orbis/_types/keyboard.h).
 enum {
     K_A = 4, K_N = 17, K_Y = 28, K_H = 11, K_I = 12, K_K = 14, K_Q = 20, K_F8 = 65, K_F9 = 66, K_F = 9, K_F1 = 58, K_F3 = 60, K_C = 6, K_D = 7, K_J = 13, K_L = 15, K_R = 21, K_T = 23, K_V = 25, K_W = 26, K_X = 27, K_1 = 30, K_9 = 38, K_0 = 39, K_RETURN = 40, K_ESC = 41, K_BACKSPACE = 42, K_TAB = 43, K_SPACE = 44,
-    K_MINUS = 45, K_EQUAL = 46, K_F5 = 62, K_F6 = 63, K_F10 = 67, K_HOME = 74, K_PGUP = 75, K_END = 77, K_PGDOWN = 78,
+    K_MINUS = 45, K_EQUAL = 46, K_F5 = 62, K_F6 = 63, K_F7 = 64, K_F10 = 67, K_U = 24, K_DELETE = 76, K_HOME = 74, K_PGUP = 75, K_END = 77, K_PGDOWN = 78,
     K_RIGHT = 79, K_LEFT = 80, K_DOWN = 81, K_UP = 82, K_APP = 101  // K_APP = tecla de menu contextual
 };
 // ------------------------------------------------------------------ configuracion y marcadores
@@ -96,7 +97,10 @@ struct Config {
     int ua = 0;               // User-Agent: 0 PS4, 1 Chrome, 2 Firefox, 3 Smart TV, 4 Lynx (paginas simples)
     bool vpart = false;       // EXPERIMENTAL: actualizar solo el rectangulo del video (SDL_UpdateWindowSurfaceRects) en vez de toda la pantalla
     bool uipart = true;       // actualizar solo las zonas que cambian de la interfaz (el bench mostro que rellenar 1920x1080 cuesta ~33 ms)
-    int dlconn = 1;           // descargas: conexiones paralelas (1..6); 0 = motor antiguo (un solo flujo, sin reanudar)
+    int dlconn = 8;           // descargas: MAXIMO de conexiones paralelas (1..12; empieza con 2 y sube sola); 0 = motor antiguo (un solo flujo, sin reanudar)
+    bool cookies = true;      // guardar/enviar cookies (sesiones, verificaciones resueltas)
+    bool adblock = true;      // no descargar scripts de publicidad/rastreo conocidos (mas rapido y menos errores)
+    std::string solver;       // ayudante del PC para resolver captchas/verificaciones (IP:puerto), ver tools/solver
     int js = 2;               // 0 = maquetador original; 1 = DOM + CSS lite; 2 = DOM + CSS lite + JavaScript (QuickJS)
     int volume = 80;          // volumen por defecto del reproductor (0..100)
 };
@@ -115,7 +119,8 @@ static void clampCfg() {
     if (g_cfg.search < 0 || g_cfg.search > 4) g_cfg.search = 0;
     if (g_cfg.ua < 0 || g_cfg.ua > 4) g_cfg.ua = 0;
     if (g_cfg.js < 0 || g_cfg.js > 2) g_cfg.js = 2;
-    if (g_cfg.dlconn < 0 || g_cfg.dlconn > 8) g_cfg.dlconn = 1;
+    if (g_cfg.dlconn < 0 || g_cfg.dlconn > 12) g_cfg.dlconn = 8;
+    g_cookiesEnabled = g_cfg.cookies;
     g_searchEngine = g_cfg.search;
     static const char* kUA[] = {"Mozilla/5.0 (PlayStation 4; psbrowser/0.2)",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -127,9 +132,9 @@ static void clampCfg() {
 static void configSave() {
     FILE* f = fopen(kCfgPath, "w");
     if (!f) return;
-    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\nvscale=%d\nvpart=%d\nsearch=%d\nua=%d\nuipart=%d\njs=%d\ndlconn=%d\n",
+    fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\nvscale=%d\nvpart=%d\nsearch=%d\nua=%d\nuipart=%d\njs=%d\ndlconn=%d\ncookies=%d\nadblock=%d\nsolver=%s\n",
             g_cfg.mouseSens, g_cfg.mouseAccel ? 1 : 0, g_cfg.wheelInvert ? 1 : 0, g_cfg.wheelStep, g_cfg.home.c_str(), g_cfg.dark ? 1 : 0,
-            g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume, g_cfg.vscale, g_cfg.vpart ? 1 : 0, g_cfg.search, g_cfg.ua, g_cfg.uipart ? 1 : 0, g_cfg.js, g_cfg.dlconn);
+            g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume, g_cfg.vscale, g_cfg.vpart ? 1 : 0, g_cfg.search, g_cfg.ua, g_cfg.uipart ? 1 : 0, g_cfg.js, g_cfg.dlconn, g_cfg.cookies ? 1 : 0, g_cfg.adblock ? 1 : 0, g_cfg.solver.c_str());
     fclose(f);
 }
 static void configLoad() {
@@ -162,6 +167,9 @@ static void configLoad() {
         else if (k == "uipart") g_cfg.uipart = v == "1";
         else if (k == "js") g_cfg.js = atoi(v.c_str());
         else if (k == "dlconn") g_cfg.dlconn = atoi(v.c_str());
+        else if (k == "cookies") g_cfg.cookies = v == "1";
+        else if (k == "adblock") g_cfg.adblock = v == "1";
+        else if (k == "solver") g_cfg.solver = v;
     }
     fclose(f);
     clampCfg();
@@ -446,7 +454,7 @@ static std::string genHome() {
         "<html><head><title>Inicio</title></head><body><h1>psbrowser</h1>"
         "<form action=\"https://html.duckduckgo.com/html/\" method=\"get\">"
         "<input type=\"text\" name=\"q\" placeholder=\"Buscar con DuckDuckGo\"> <input type=\"submit\" value=\"Buscar\"></form>"
-        "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:images\">Imagenes de la ultima pagina</a> | <a href=\"about:videos\">Videos de la pagina</a> | <a href=\"about:history\">Historial</a> | <a href=\"about:shortcuts\">Atajos</a> | <a href=\"psb:quit\">Salir</a></p>"
+        "<p><a href=\"about:downloads\">Descargas</a> | <a href=\"about:images\">Imagenes de la ultima pagina</a> | <a href=\"about:videos\">Videos de la pagina</a> | <a href=\"about:history\">Historial</a> | <a href=\"about:shortcuts\">Atajos</a> | <a href=\"about:verify\">Verificacion (F7)</a> | <a href=\"about:cookies\">Cookies</a> | <a href=\"psb:quit\">Salir</a></p>"
         "<h2>Marcadores</h2>";
     if (g_bookmarks.empty()) h += "<p>Aun no hay marcadores: pulsa la estrella de la barra (o Ctrl+D) en una pagina.</p>";
     else {
@@ -511,6 +519,8 @@ static std::string genSettings() {
         "algunas paginas de streaming y de video sirven mas contenido a Chrome/Smart TV, otras dan HTML mas simple a Lynx)</p>"
         "<p>Paginas con DOM + CSS + JavaScript: <a href=\"psb:js\">[ " + std::string(g_cfg.js == 0 ? "no (maquetador original)" : (g_cfg.js == 1 ? "DOM + CSS lite" : "DOM + CSS + JavaScript")) + " ]</a> (motor: " + (jsx_has_engine() ? "QuickJS" : "no incluido") + "; se aplica a la siguiente pagina)</p>"
         "<p>Descargas - conexiones paralelas: <a href=\"psb:dlconn\">[ " + std::string(g_cfg.dlconn == 0 ? "motor antiguo (1 flujo, sin reanudar)" : std::to_string(g_cfg.dlconn) + (g_cfg.dlconn == 1 ? " (reanudable)" : " (reanudable, paralelo)")) + " ]</a> <a href=\"about:dlbench\">[ Medir descargas (red y disco) ]</a></p>"
+        "<p>Cookies (sesiones y verificaciones resueltas): <a href=\"psb:cookies\">[ " + std::string(g_cfg.cookies ? "si" : "no") + " ]</a> <a href=\"about:cookies\">[ ver / importar ]</a> | Bloquear publicidad y rastreo en scripts: <a href=\"psb:adblock\">[ " + std::string(g_cfg.adblock ? "si" : "no") + " ]</a></p>"
+        "<p>Captchas y verificaciones: <a href=\"about:verify\">[ ayudante del PC (F7) ]</a> " + (g_cfg.solver.empty() ? std::string("(sin configurar)") : htmlEscape(g_cfg.solver)) + "</p>"
         "<p>Interfaz: repintar solo lo que cambia: <a href=\"psb:uipart\">[ " + std::string(g_cfg.uipart ? "si" : "no") + " ]</a> (si ves parpadeos o restos en pantalla, desactivalo)</p>"
         "<p><a href=\"about:shortcuts\">[ Atajos de teclado (F1) ]</a> <a href=\"about:history\">[ Historial (Ctrl+H) ]</a></p>";
     const size_t e = out.rfind("</body>");
@@ -660,7 +670,7 @@ static std::string genVideos() {
 static std::string genShortcuts() {
     return "<html><head><title>Atajos de teclado</title></head><body><h1>Atajos de teclado</h1>"
            "<h2>Navegacion</h2><ul>"
-           "<li>Ctrl+L / F6: barra de direcciones. Alt+Izquierda / Atras: pagina anterior. Alt+Derecha: siguiente. Alt+Inicio: pagina de inicio.</li>"
+           "<li>Ctrl+L / Alt+D / F6: barra de direcciones. Alt+Izquierda / Atras: pagina anterior. Alt+Derecha: siguiente. Alt+Inicio: pagina de inicio.</li>"
            "<li>F5 / Ctrl+R: recargar. Ctrl+V: pegar y ir. Ctrl+C: copiar enlace seleccionado o la direccion.</li>"
            "<li>Tab / Mayus+Tab: siguiente / anterior enlace o campo. Intro: abrir. Flechas, RePag, AvPag, Espacio, Inicio, Fin: desplazarse.</li></ul>"
            "<h2>Pestanas</h2><ul>"
@@ -668,6 +678,8 @@ static std::string genShortcuts() {
            "<h2>Pagina</h2><ul>"
            "<li>Ctrl+F: buscar en la pagina (Intro / F3: siguiente, Mayus+F3: anterior, Esc: cerrar). Ctrl++ / Ctrl+-: tamano del texto, Ctrl+0: restablecer.</li>"
            "<li>Ctrl+D: marcador. Ctrl+J: descargas. Ctrl+H: historial. F8: videos de la pagina. F10: configuracion. F1: esta ayuda.</li>"
+           "<li>F7: verificacion / captcha (resolverlo en el PC). Ctrl+U: codigo fuente de la pagina. Ctrl+Mayus+Supr: cookies.</li>"
+           "<li>Comandos en la barra de direcciones: <b>!solver IP:puerto</b> (ayudante del PC), <b>!ua dominio User-Agent</b>, <b>!cookies</b>, <b>!verify</b>, <b>!source</b>.</li>"
            "<li>Clic derecho / Mayus+F10 / tecla Menu: menu contextual (copiar enlace, abrir en pestana nueva, descargar...).</li></ul>"
            "<h2>Video</h2><ul>"
            "<li>Espacio / K: pausa. Izquierda / Derecha: -10 / +10 s. J / L: -30 / +30 s. Arriba / Abajo: volumen. Inicio: al principio. H: calidad. I: estadisticas. Esc / Q: cerrar.</li></ul>"
@@ -696,7 +708,76 @@ static std::string genBench() {
     h += "<p>Devuelve /data/psbrowser/log.txt (lineas [bench]) para decidir la mejora. <a href=\"about:settings\">Configuracion</a></p></body></html>";
     return h;
 }
+static std::string g_rawHtml;  // HTML original de la pagina que se esta cargando (antes de DOM/JS); los videos se buscan ahi (los scripts no se conservan)
+// ------------------------------------------------------------------ verificaciones / captchas (v0.9.1)
+// El navegador no ejecuta los captchas ni la comprobacion de Cloudflare. Se resuelven en el PC (a mano, con tu navegador) y el
+// ayudante tools/solver/psb_solver.py pasa a la PS4 las cookies resultantes (y el User-Agent con el que se resolvio) y las descargas que
+// el PC intento hacer. Nada se resuelve solo: lo resuelves tu.
+static std::string g_lastSource;                   // HTML de la ultima pagina descargada (about:source, Ctrl+U)
+static std::string g_challengeUrl;                 // pagina que pidio la verificacion
+static std::string g_solveMsg;                     // ultimo mensaje del ayudante
+struct SolveDl { std::string url, name; long long size = -1; };
+static std::vector<SolveDl> g_solveDls;            // descargas capturadas en el PC
+static std::string fmtSize(long long n) {
+    char b[48];
+    if (n < 0) return "?";
+    if (n >= (1LL << 30)) snprintf(b, sizeof(b), "%.2f GB", n / 1073741824.0);
+    else if (n >= (1LL << 20)) snprintf(b, sizeof(b), "%.1f MB", n / 1048576.0);
+    else snprintf(b, sizeof(b), "%lld KB", n / 1024);
+    return b;
+}
+static std::string genVerify() {
+    std::string h = "<html><head><title>Verificacion / captcha</title></head><body><h1>Verificacion o captcha</h1>";
+    if (!g_challengeUrl.empty()) h += "<p>Pagina que lo pide: " + htmlEscape(g_challengeUrl) + "</p>";
+    h += "<p>Esta consola no puede dibujar captchas ni la comprobacion de Cloudflare, pero puedes <b>resolverlos tu en el PC</b> y pasar a la PS4 el resultado (cookies). No se resuelve nada automaticamente.</p>";
+    if (g_cfg.solver.empty()) {
+        h += "<h2>1. Preparar (una sola vez)</h2><ul><li>En el PC ejecuta: <b>python psb_solver.py</b> (carpeta tools/solver del repo; ver su README). Te dira su direccion, por ejemplo 192.168.1.20:8765.</li>"
+             "<li>Aqui, en la barra de direcciones (Ctrl+L), escribe: <b>!solver 192.168.1.20:8765</b> y pulsa Intro.</li></ul>";
+    } else {
+        h += "<p>Ayudante del PC: <b>" + htmlEscape(g_cfg.solver) + "</b> (para cambiarlo: barra de direcciones, <b>!solver IP:puerto</b>)</p><h2>Pasos</h2><ol>";
+        if (!g_challengeUrl.empty()) h += "<li><a href=\"psb:solveopen\">[ Abrir esta pagina en el PC ]</a> y resuelve alli el captcha / la verificacion; si hay que pulsar un boton de descarga, hazlo en el PC.</li>";
+        else h += "<li>Abre la pagina en el PC (con el ayudante en marcha) y resuelve alli el captcha / la verificacion.</li>";
+        h += "<li><a href=\"psb:solvesync\">[ Traer cookies y descargas del PC ]</a></li>";
+        if (!g_challengeUrl.empty()) h += "<li><a href=\"" + htmlEscape(g_challengeUrl) + "\">[ Reintentar la pagina en la PS4 ]</a></li>";
+        h += "</ol>";
+    }
+    if (!g_solveMsg.empty()) h += "<p><b>" + htmlEscape(g_solveMsg) + "</b></p>";
+    if (!g_solveDls.empty()) {
+        h += "<h2>Descargas que el PC capturo</h2><ul>";
+        for (const SolveDl& d : g_solveDls) h += "<li>" + htmlEscape(d.name) + " (" + fmtSize(d.size) + ") <a href=\"psb:dlgo:" + htmlEscape(d.url) + "\">[ Descargar en la PS4 ]</a></li>";
+        h += "</ul>";
+    }
+    h += "<h2>Sin ayudante</h2><p>Tambien puedes copiar a mano un archivo de cookies (formato Netscape, el que exportan las extensiones de navegador) a <b>/data/psbrowser/cookies_import.txt</b> (por FTP) y pulsar <a href=\"psb:ckimport\">[ Importar cookies ]</a>. "
+         "Las cookies de verificacion (cf_clearance) solo valen con el mismo User-Agent: en el archivo puedes anadir una linea <b>#UA&lt;tab&gt;dominio&lt;tab&gt;User-Agent</b>, o escribir en la barra <b>!ua dominio User-Agent completo</b>.</p>"
+         "<p><a href=\"about:cookies\">Cookies guardadas</a> | <a href=\"about:settings\">Configuracion</a> | <a href=\"about:home\">Inicio</a></p></body></html>";
+    return h;
+}
+static std::string genCookies() {
+    std::string h = "<html><head><title>Cookies</title></head><body><h1>Cookies</h1><p>Guardar cookies: <a href=\"psb:cookies\">[ " + std::string(g_cfg.cookies ? "si" : "no") +
+                    " ]</a> | " + std::to_string(cookies_count()) + " guardadas en /data/psbrowser/cookies.txt (formato Netscape).</p>"
+                    "<p><a href=\"psb:ckimport\">[ Importar /data/psbrowser/cookies_import.txt ]</a> <a href=\"psb:ckexport\">[ Exportar a cookies_export.txt ]</a> <a href=\"psb:ckclear\">[ Borrar todas ]</a></p>";
+    const std::vector<CookieDomainInfo> ds = cookies_domains();
+    if (ds.empty()) h += "<p>No hay cookies.</p>";
+    else { h += "<ul>"; for (const CookieDomainInfo& d : ds) h += "<li>" + htmlEscape(d.domain) + " (" + std::to_string(d.count) + ") <a href=\"psb:ckclear:" + htmlEscape(d.domain) + "\">[ borrar ]</a></li>"; h += "</ul>"; }
+    const auto uas = ua_overrides();
+    h += "<h2>User-Agent por dominio</h2>";
+    if (uas.empty()) h += "<p>Ninguno. (Barra de direcciones: <b>!ua dominio User-Agent</b>)</p>";
+    else { h += "<ul>"; for (const auto& u : uas) h += "<li>" + htmlEscape(u.first) + ": " + htmlEscape(u.second.substr(0, 90)) + " <a href=\"psb:uaclear:" + htmlEscape(u.first) + "\">[ quitar ]</a></li>"; h += "</ul>"; }
+    h += "<p><a href=\"about:verify\">Verificacion / captcha</a> | <a href=\"about:settings\">Configuracion</a></p></body></html>";
+    return h;
+}
+static std::string genSource() {
+    std::string h = "<html><head><title>Codigo fuente</title></head><body><h1>Codigo fuente de la ultima pagina</h1>";
+    if (g_lastSource.empty()) { h += "<p>Aun no hay ninguna pagina cargada.</p></body></html>"; return h; }
+    const size_t n = std::min<size_t>(g_lastSource.size(), 150000);
+    h += "<p>" + std::to_string(g_lastSource.size()) + " bytes" + (n < g_lastSource.size() ? " (se muestran los primeros 150000)" : "") + ".</p><pre>" + htmlEscape(g_lastSource.substr(0, n)) + "</pre></body></html>";
+    
+    return h;
+}
 static std::string genInternal(const std::string& url) {
+    if (url == "about:verify") return genVerify();
+    if (url == "about:cookies") return genCookies();
+    if (url == "about:source") return genSource();
     if (url == "about:shortcuts") return genShortcuts();
     if (url == "about:history") return genHistory();
     if (url == "about:bench") return genBench();
@@ -751,24 +832,64 @@ static void captureImages(const Browser& b) {
     g_lastImgs.swap(v);
     g_lastImgsPage = b.url;
 }
+// Publicidad y rastreo: scripts que no aportan nada a esta consola y que en los logs de v0.9.0 costaban segundos y daban errores.
+static bool adBlocked(const std::string& url) {
+    if (!g_cfg.adblock) return false;
+    std::string sc, host, path;
+    if (!url_split(url, sc, host, path)) return false;
+    static const char* kHosts[] = {"doubleclick.net", "googlesyndication.com", "googletagmanager.com", "google-analytics.com", "googleadservices.com",
+        "adservice.google.com", "magsrv.com", "tsyndicate.com", "exoclick.com", "exosrv.com", "exdynsrv.com", "juicyads.com", "trafficjunky.com",
+        "trafficfactory.biz", "adsterra.com", "highperformanceformat.com", "profitablecpmrate.com", "profitablecpmgate.com", "popads.net", "popcash.net",
+        "propellerads.com", "onclickads.net", "clickadu.com", "hilltopads.net", "a-ads.com", "adcash.com", "histats.com", "hotjar.com", "connect.facebook.net",
+        "mc.yandex.ru", "clarity.ms", "cloudflareinsights.com", "scorecardresearch.com", "quantserve.com", "outbrain.com", "taboola.com", "criteo.com",
+        "adnxs.com", "rubiconproject.com", "pubmatic.com", "amazon-adsystem.com", "bidswitch.net", "ad-maven.com", "admaven.com", "richpartners.com",
+        "adspyglass.com", "clickaine.com", "mc.exoclick.com", "syndication.realsrv.com", "realsrv.com", "tapioni.com", "adxxx.com", "plugrush.com"};
+    for (const char* h : kHosts) {
+        const size_t n = strlen(h);
+        if (host == h || (host.size() > n && host.compare(host.size() - n, n, h) == 0 && host[host.size() - n - 1] == '.')) return true;
+    }
+    return path.find("/ad-provider") != std::string::npos || path.find("/adblock") != std::string::npos;
+}
+// Cache de scripts y hojas de estilo (solo .js/.css): jQuery y los temas se repiten en todas las paginas de un sitio.
+static std::map<std::string, std::pair<std::string, std::string>> g_assetCache;
+static size_t g_assetCacheBytes = 0;
+static bool isCacheableAsset(const std::string& url) {
+    std::string sc, host, path;
+    if (!url_split(url, sc, host, path)) return false;
+    const size_t n = path.size();
+    return (n > 3 && path.compare(n - 3, 3, ".js") == 0) || (n > 4 && path.compare(n - 4, 4, ".css") == 0) || (n > 4 && path.compare(n - 4, 4, ".mjs") == 0);
+}
 static void jsxHostInit() {
     JsHost h;
     h.nowMs = [] { return static_cast<uint32_t>(SDL_GetTicks()); };
     h.log = [](const std::string& l) { psb_log("%s", l.c_str()); };
     h.resolve = [](const std::string& base, const std::string& ref) { return urlResolve(base, ref); };
     h.userAgent = g_netUserAgent;
+    h.blocked = [](const std::string& url) { return adBlocked(url); };
+    h.getCookies = [](const std::string& url) { return cookies_for_script(url); };
+    h.setCookie = [](const std::string& url, const std::string& ck) { cookies_set_from_script(url, ck); };
     h.fetch = [](const std::string& url, size_t maxBody, std::string& body, std::string& fin, int& status, std::string& ct) {
+        if (adBlocked(url)) { body.clear(); fin = url; status = 204; ct.clear(); return true; }
+        const bool cacheable = isCacheableAsset(url);
+        if (cacheable) {
+            auto it = g_assetCache.find(url);
+            if (it != g_assetCache.end() && it->second.first.size() <= maxBody) { body = it->second.first; ct = it->second.second; fin = url; status = 200; return true; }
+        }
         HttpResult r;
         if (!http_get(url, r, maxBody, 4)) { status = r.status; return false; }
         body = std::move(r.body);
         fin = r.finalUrl;
         status = r.status;
         ct = r.contentType;
+        if (cacheable && status == 200 && !body.empty() && body.size() <= 2 * 1024 * 1024) {
+            if (g_assetCacheBytes + body.size() > 24u * 1024 * 1024) { g_assetCache.clear(); g_assetCacheBytes = 0; }
+            g_assetCache[url] = {body, ct};
+            g_assetCacheBytes += body.size();
+        }
         return true;
     };
     jsx_set_host(h);
 }
-static std::string g_rawHtml;  // HTML original de la pagina que se esta cargando (antes de DOM/JS); los videos se buscan ahi (los scripts no se conservan)
 static void setPage(Browser& b, const std::string& url, std::string html, int kind) {
     jsx_close(&b);
     b.url = url;
@@ -1079,7 +1200,7 @@ static DlFetchFn makeNetFetch(const std::string& referer) {
             Ad(DlChunkSink& c_, DlFetchResult& o_) : c(c_), o(o_) {}
             bool begin(const HttpResult& r) override {
                 o.status = r.status; o.rangeTotal = r.rangeTotal; o.contentLength = r.contentLength;
-                o.finalUrl = r.finalUrl; o.contentType = r.contentType; o.contentDisposition = r.contentDisposition;
+                o.finalUrl = r.finalUrl; o.contentType = r.contentType; o.contentDisposition = r.contentDisposition; o.retryAfterMs = r.retryAfterMs;
                 return c.begin(o);
             }
             bool write(const void* d, size_t n) override { return c.write(d, n); }
@@ -1091,6 +1212,7 @@ static DlFetchFn makeNetFetch(const std::string& referer) {
         HttpResult r;
         const bool ok = http_request_nolock(url, nullptr, r, 0, 8, &ad, nullptr, &ex);
         if (r.status) out.status = r.status;
+        if (r.retryAfterMs) out.retryAfterMs = r.retryAfterMs;
         out.stage = r.stage;
         out.sceError = r.sceError;
         if (!r.finalUrl.empty()) out.finalUrl = r.finalUrl;
@@ -1413,6 +1535,17 @@ static void showDownloadPrompt(Browser& b, const HttpResult& r) {
 // Cuerpo POST pendiente: lo deja submitForm y lo consume load() una sola vez (recargar o volver usan GET).
 static HttpPost g_post;
 static bool g_hasPost = false;
+static bool looksLikeChallenge(const HttpResult& r) {
+    if (r.cfChallenge) return true;
+    if (r.status != 403 && r.status != 429 && r.status != 503) return false;
+    const std::string head = r.body.substr(0, 30000);
+    return containsCI(head, "challenge-platform") || containsCI(head, "just a moment") || containsCI(head, "cf-browser-verification") ||
+           containsCI(head, "checking your browser") || containsCI(head, "ddos-guard") || containsCI(head, "attention required") || containsCI(head, "cf-turnstile");
+}
+static bool pageHasCaptcha(const std::string& html) {
+    const std::string head = html.substr(0, 400000);
+    return containsCI(head, "g-recaptcha") || containsCI(head, "h-captcha") || containsCI(head, "cf-turnstile") || containsCI(head, "data-sitekey") || containsCI(head, "recaptcha/api");
+}
 static void load(Browser& b, const std::string& urlIn, int depth = 0) {
     HttpPost post;
     const bool isPost = g_hasPost;
@@ -1460,6 +1593,19 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
         if (charset_to_utf8(res.body, cs)) psb_log("[charset] convertido a UTF-8 (declarado: '%s')", cs.c_str());
         else if (!cs.empty() && cs != "utf-8" && cs != "utf8") psb_log("[charset] '%s' sin soporte: se muestra tal cual", cs.c_str());
     }
+    if ((ct.empty() || containsCI(ct, "html")) && looksLikeChallenge(res)) {   // pagina de verificacion (p. ej. Cloudflare): no se puede resolver aqui
+        g_challengeUrl = finalUrl;
+        g_lastSource = res.body.substr(0, 300000);
+        psb_log("[verify] verificacion detectada en %s (HTTP %d)", finalUrl.c_str(), status);
+        setPage(b, finalUrl, genVerify(), 0);
+        if (!b.doc.focus.empty()) b.sel = 0;
+        toast("Esta pagina pide una verificacion (ver la ayuda de esta pagina)", true);
+        cookies_save();
+        return;
+    }
+    const bool hasCaptcha = (ct.empty() || containsCI(ct, "html")) && pageHasCaptcha(res.body);
+    if (ct.empty() || containsCI(ct, "html")) g_lastSource = res.body.substr(0, 300000);
+    if (hasCaptcha) g_challengeUrl = finalUrl;
     if (ct.empty() || containsCI(ct, "html")) {
         if (g_cfg.js > 0) {
             jsxHostInit();
@@ -1489,7 +1635,9 @@ static void load(Browser& b, const std::string& urlIn, int depth = 0) {
     }
     psb_log("[page] HTTP %d - %zu bytes%s - %zu lineas, %zu enlaces, %zu imagenes, %zu campos, alto %d px", status, bytes,
             truncated ? " (truncado a 2 MB)" : "", b.doc.lines.size(), b.doc.links.size(), b.doc.images.size(), b.doc.fields.size(), b.doc.height);
-    if (status != 200) toast("HTTP " + std::to_string(status), true);
+    cookies_save();
+    if (hasCaptcha) toast("Esta pagina tiene un captcha: F7 = resolverlo en el PC", true);
+    else if (status != 200) toast("HTTP " + std::to_string(status), true);
     else if (truncated) toast("Pagina truncada a 2 MB", true);
     if (!frag.empty()) jumpAnchor(b, frag);
 }
@@ -1595,6 +1743,107 @@ static void runBench();
 static void runDlBench(int which);
 static bool g_vidFastPrev0 = false;  // pedir un repintado completo (bandas negras) en el siguiente fotograma de video
 static bool g_uiForceFull = true;    // el siguiente fotograma de la interfaz se sube entero (actualizacion parcial)
+// ------------------------------------------------------------------ ayudante del PC (tools/solver/psb_solver.py)
+static std::string trimStr(const std::string& s) {
+    size_t a = 0, e = s.size();
+    while (a < e && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) a++;
+    while (e > a && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r' || s[e - 1] == '\n')) e--;
+    return s.substr(a, e - a);
+}
+static bool solverGet(const std::string& path, std::string& body, std::string& err) {
+    if (g_cfg.solver.empty()) { err = "Falta la direccion del ayudante: escribe en la barra !solver IP:puerto"; return false; }
+    HttpResult r;
+    if (!http_get("http://" + g_cfg.solver + path, r, 8 * 1024 * 1024, 0)) { err = "No se pudo conectar con " + g_cfg.solver + " (" + r.stage + "). Esta el ayudante en marcha y en la misma red?"; return false; }
+    if (r.status != 200) { err = "El ayudante respondio HTTP " + std::to_string(r.status); return false; }
+    body = std::move(r.body);
+    return true;
+}
+// Texto de estado: lineas "#UA\tdominio\tUser-Agent", "#DL\turl\tnombre\ttamano" y cookies en formato Netscape.
+static std::string importState(const std::string& text, int* nCookies, int* nUa, int* nDl, bool replaceDls) {
+    int nc = 0, nu = 0, nd = 0;
+    std::string cookieText;
+    if (replaceDls) g_solveDls.clear();
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos) eol = text.size();
+        std::string line = text.substr(pos, eol - pos);
+        pos = eol + 1;
+        while (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.compare(0, 4, "#UA\t") == 0) {
+            const size_t t = line.find('\t', 4);
+            if (t != std::string::npos) { ua_override_set(line.substr(4, t - 4), line.substr(t + 1)); nu++; }
+        } else if (line.compare(0, 4, "#DL\t") == 0) {
+            std::vector<std::string> f;
+            size_t a = 4;
+            for (;;) { const size_t t = line.find('\t', a); if (t == std::string::npos) { f.push_back(line.substr(a)); break; } f.push_back(line.substr(a, t - a)); a = t + 1; }
+            if (!f.empty() && urlIsHttp(f[0])) { SolveDl d; d.url = f[0]; d.name = f.size() > 1 && !f[1].empty() ? f[1] : titleFromUrl(f[0]); d.size = f.size() > 2 ? atoll(f[2].c_str()) : -1; g_solveDls.push_back(d); nd++; }
+        } else cookieText += line + "\n";
+    }
+    nc = cookies_import_netscape(cookieText);
+    cookies_save();
+    if (nCookies) *nCookies = nc;
+    if (nUa) *nUa = nu;
+    if (nDl) *nDl = nd;
+    return std::string();
+}
+static void solverSync() {
+    std::string body, err;
+    if (!solverGet("/state", body, err)) { g_solveMsg = err; return; }
+    int nc = 0, nu = 0, nd = 0;
+    importState(body, &nc, &nu, &nd, true);
+    g_solveMsg = std::to_string(nc) + " cookies, " + std::to_string(nu) + " User-Agent y " + std::to_string(nd) + " descarga(s) traidas del PC." +
+                 (nc == 0 ? " (Sin cookies: has resuelto ya la verificacion en el PC?)" : " Ya puedes reintentar la pagina o descargar.");
+    psb_log("[solver] %s", g_solveMsg.c_str());
+}
+static void solverOpen() {
+    std::string body, err;
+    if (g_challengeUrl.empty()) { g_solveMsg = "No hay pagina que abrir."; return; }
+    if (!solverGet("/open?url=" + urlPercentEncode(g_challengeUrl), body, err)) { g_solveMsg = err; return; }
+    g_solveMsg = "Abierta en el PC. Resuelvela alli y luego pulsa 'Traer cookies y descargas del PC'.";
+}
+static int importCookieFile() {
+    const char* path = "/data/psbrowser/cookies_import.txt";
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    std::string t; char buf[4096]; size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) t.append(buf, n);
+    fclose(f);
+    int nc = 0, nu = 0, nd = 0;
+    importState(t, &nc, &nu, &nd, false);
+    rename(path, "/data/psbrowser/cookies_import.done.txt");
+    psb_log("[cookies] importadas %d cookies, %d User-Agent", nc, nu);
+    return nc;
+}
+// Comandos de la barra de direcciones (empiezan por '!' para no chocar con las busquedas).
+static std::string userInput(const std::string& in) {
+    const std::string s = trimStr(in);
+    if (s.size() > 1 && s[0] == '!') {
+        const size_t sp = s.find(' ');
+        const std::string cmd = s.substr(1, sp == std::string::npos ? std::string::npos : sp - 1);
+        const std::string arg = sp == std::string::npos ? std::string() : trimStr(s.substr(sp + 1));
+        if (cmd == "solver") {
+            std::string a = arg;
+            if (a.compare(0, 7, "http://") == 0) a = a.substr(7);
+            while (!a.empty() && a.back() == '/') a.pop_back();
+            g_cfg.solver = a;
+            configSave();
+            toast(a.empty() ? "Ayudante del PC quitado" : "Ayudante del PC: " + a);
+            return "about:verify";
+        }
+        if (cmd == "ua") {
+            const size_t sp2 = arg.find(' ');
+            if (sp2 == std::string::npos) { toast("Uso: !ua dominio User-Agent", true); return "about:cookies"; }
+            ua_override_set(arg.substr(0, sp2), trimStr(arg.substr(sp2 + 1)));
+            toast("User-Agent guardado para " + arg.substr(0, sp2));
+            return "about:cookies";
+        }
+        if (cmd == "cookies") return "about:cookies";
+        if (cmd == "verify" || cmd == "captcha") return "about:verify";
+        if (cmd == "source") return "about:source";
+    }
+    return urlFromUserInput(in);
+}
 static bool handleAction(Browser& b, const std::string& a) {
     bool cfg = true, relay = false;
     if (a == "sens-1") g_cfg.mouseSens -= 1.0f;
@@ -1624,8 +1873,8 @@ static bool handleAction(Browser& b, const std::string& a) {
     else if (a == "clearhist") { g_history.clear(); historySave(); toast("Historial borrado"); }
     else if (a == "vscale") g_cfg.vscale = (g_cfg.vscale + 1) % 3;
     else if (a == "js") g_cfg.js = (g_cfg.js + 1) % 3;
-    else if (a == "dlconn") { static const int seq[] = {1, 2, 3, 4, 6, 0}; int i = 0; for (int k = 0; k < 6; k++) if (seq[k] == g_cfg.dlconn) i = k; g_cfg.dlconn = seq[(i + 1) % 6]; }
-    else if (a.compare(0, 10, "dlconnset:") == 0) { g_cfg.dlconn = std::max(0, std::min(8, atoi(a.c_str() + 10))); navigate(b, "about:dlbench", true); configSave(); return true; }
+    else if (a == "dlconn") { static const int seq[] = {1, 2, 4, 6, 8, 12, 0}; int i = 0; for (int k = 0; k < 7; k++) if (seq[k] == g_cfg.dlconn) i = k; g_cfg.dlconn = seq[(i + 1) % 7]; }
+    else if (a.compare(0, 10, "dlconnset:") == 0) { g_cfg.dlconn = std::max(0, std::min(12, atoi(a.c_str() + 10))); navigate(b, "about:dlbench", true); configSave(); return true; }
     else if (a.compare(0, 8, "dlbench:") == 0) { runDlBench(atoi(a.c_str() + 8)); navigate(b, "about:dlbench", true); return true; }
     else if (a.compare(0, 9, "dlresume:") == 0) {  // psb:dlresume:N = continuar una descarga incompleta
         std::vector<DlPartial> ps = dl_list_partials(kDlDir);
@@ -1668,6 +1917,25 @@ static bool handleAction(Browser& b, const std::string& a) {
         }
         cfg = false;
     }
+    else if (a == "cookies") { g_cfg.cookies = !g_cfg.cookies; g_cookiesEnabled = g_cfg.cookies; }
+    else if (a == "adblock") g_cfg.adblock = !g_cfg.adblock;
+    else if (a == "solveopen") { solverOpen(); navigate(b, "about:verify", false); return true; }
+    else if (a == "solvesync") { solverSync(); navigate(b, "about:verify", false); return true; }
+    else if (a == "ckimport") {
+        const int n = importCookieFile();
+        g_solveMsg = n < 0 ? "No hay /data/psbrowser/cookies_import.txt" : std::to_string(n) + " cookies importadas.";
+        toast(g_solveMsg, n <= 0);
+        navigate(b, "about:cookies", false);
+        return true;
+    }
+    else if (a == "ckexport") {
+        FILE* f = fopen("/data/psbrowser/cookies_export.txt", "wb");
+        if (f) { const std::string t = cookies_export_netscape(); fwrite(t.data(), 1, t.size(), f); fclose(f); toast("Exportadas a /data/psbrowser/cookies_export.txt"); }
+        cfg = false;
+    }
+    else if (a == "ckclear") { cookies_clear(); cookies_save(); toast("Cookies borradas"); cfg = false; }
+    else if (a.compare(0, 8, "ckclear:") == 0) { cookies_clear(a.substr(8)); cookies_save(); cfg = false; }
+    else if (a.compare(0, 8, "uaclear:") == 0) { ua_override_set(a.substr(8), std::string()); cfg = false; }
     else if (a.compare(0, 6, "delbm:") == 0) {
         size_t i = static_cast<size_t>(atoi(a.c_str() + 6));
         if (i < g_bookmarks.size()) { g_bookmarks.erase(g_bookmarks.begin() + i); bookmarksSave(); }
@@ -1826,7 +2094,7 @@ static std::string hostOf(const std::string& u) {
 static std::string tabTitle(const Browser& b) {
     if (!b.doc.title.empty()) return b.doc.title;
     if (b.url.empty() || b.url == "about:blank") return "Pestana nueva";
-    if (isInternal(b.url)) return b.url == "about:settings" ? "Configuracion" : (b.url == "about:bookmarks" ? "Marcadores" : (b.url == "about:history" ? "Historial" : (b.url == "about:shortcuts" ? "Atajos" : "Inicio")));
+    if (isInternal(b.url)) return b.url == "about:settings" ? "Configuracion" : (b.url == "about:bookmarks" ? "Marcadores" : (b.url == "about:history" ? "Historial" : (b.url == "about:shortcuts" ? "Atajos" : (b.url == "about:verify" ? "Verificacion" : (b.url == "about:cookies" ? "Cookies" : (b.url == "about:source" ? "Codigo fuente" : "Inicio"))))));
     return hostOf(b.url);
 }
 static void startUrlEdit(Browser& b, const std::string& initial, bool fresh) {
@@ -1867,7 +2135,7 @@ static void oskApply(Browser& b, OskResult r) {
         const int target = g_oskTarget;
         oskClose();
         if (target == 1) {
-            const std::string u = urlFromUserInput(b.urlText);
+            const std::string u = userInput(b.urlText);
             b.urlEdit = false;
             if (!u.empty()) navigate(b, u, true);
         } else if (target == 2) {
@@ -2510,6 +2778,7 @@ static void quitClick() {
 // Salida: cierra el video y termina el proceso con _exit (evita destructores estaticos con hilos vivos). Un hilo vigilante fuerza la salida
 // si algo se atasca al cerrar (p. ej. el reproductor).
 static void hardExit() {
+    cookies_save();
     psb_log("[quit] saliendo");
     std::thread([] { SDL_Delay(2500); psb_log("[quit] salida forzada por el vigilante"); _exit(0); }).detach();
     vp_shutdown();  // cierra video (si lo hay), puerto de audio y texturas, y lo deja registrado
@@ -2843,7 +3112,7 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
     // 1) edicion de la barra de direcciones
     if (b.urlEdit) {
         if (code == K_RETURN) {
-            const std::string u = urlFromUserInput(b.urlText);
+            const std::string u = userInput(b.urlText);
             b.urlEdit = false;
             g_dirty = true;
             if (!u.empty()) navigate(b, u, true);
@@ -2936,6 +3205,8 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
             case K_TAB: activateTab(shift ? (g_cur + n - 1) % n : (g_cur + 1) % n); return;
             case K_L: startUrlEdit(b, isInternal(b.url) ? "" : b.url, true); return;
             case K_D: toggleBookmark(b); return;
+            case K_U: navigate(b, "about:source", true); return;
+            case K_DELETE: if (shift) navigate(b, "about:cookies", true); return;
             case K_J: navigate(b, "about:downloads", true); return;
             case K_EQUAL: changeZoom(10); return;
             case K_MINUS: changeZoom(-10); return;
@@ -2945,6 +3216,8 @@ static void onKeyDown(int code, int ch, uint32_t mods) {
     }
     switch (code) {
         case K_F6: startUrlEdit(b, isInternal(b.url) ? "" : b.url, true); return;
+        case K_D: if (alt) { startUrlEdit(b, isInternal(b.url) ? "" : b.url, true); return; } break;
+        case K_F7: if (urlIsHttp(b.url)) g_challengeUrl = b.url; navigate(b, "about:verify", true); return;
         case K_F5: reload(b); return;
         case K_F10: if (shift) ctxOpenAtFocus(); else navigate(b, "about:settings", true); return;
         case K_F8: navigate(b, "about:videos", true); return;
@@ -3037,9 +3310,12 @@ static void mouseLeftPress(bool& dragging, int& dragOff) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.9.0 (DOM+CSS+JS) ==");
+    psb_log("== psbrowser v0.9.1 (DOM+CSS+JS) ==");
     psb_log("[jsx] motor JS: %s | js=%d uipart=%d", jsx_has_engine() ? "QuickJS" : "no incluido", g_cfg.js, g_cfg.uipart ? 1 : 0);
     configLoad();
+    cookies_load();
+    if (g_cfg.cookies) { const int n = importCookieFile(); if (n >= 0) psb_log("[cookies] cookies_import.txt: %d", n); }
+    psb_log("[cookies] %zu cookies cargadas, adblock=%d, solver='%s'", cookies_count(), g_cfg.adblock ? 1 : 0, g_cfg.solver.c_str());
     bookmarksLoad();
     historyLoad();
     clampCfg();  // aplica el buscador y el User-Agent guardados

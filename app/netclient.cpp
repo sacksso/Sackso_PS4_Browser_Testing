@@ -1,11 +1,13 @@
 #include "netclient.h"
 #include "inflate.h"
+#include "cookies.h"
 
 #include <orbis/Http.h>
 #include <orbis/Net.h>
 #include <orbis/Ssl.h>
 #include <orbis/Sysmodule.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -19,10 +21,13 @@
 std::string g_netUserAgent = "Mozilla/5.0 (PlayStation 4; psbrowser/0.2)";
 
 // Tamanos de pools habituales en homebrew de PS4.
-static const int NET_POOL_SIZE = 16 * 1024;
-static const size_t SSL_POOL_SIZE = 300 * 1024;
-static const size_t HTTP_POOL_SIZE = 1024 * 1024;
-static const size_t kHeaderMax = 128 * 1024;  // limite de cabeceras de respuesta que pedimos a libSceHttp
+// v0.9.1: el log de v0.9.0 mostro que con 6 descargas HTTPS en paralelo sendRequest fallaba (0x809517D5, codigo de libSceSsl): cada
+// conexion TLS y cada buffer de cabeceras (128 KB) sale de estos pools, y los antiguos (SSL 300 KB, HTTP 1 MB) no daban para 6 a la vez.
+static const int NET_POOL_SIZE = 128 * 1024;
+static const size_t SSL_POOL_SIZE = 4 * 1024 * 1024;
+static const size_t HTTP_POOL_SIZE = 8 * 1024 * 1024;
+static const size_t kHeaderMax = 128 * 1024;  // limite de cabeceras de respuesta que pedimos a libSceHttp (paginas)
+static const size_t kHeaderMaxDl = 32 * 1024;  // descargas/rangos: cabeceras pequenas, asi caben muchas conexiones en el pool
 
 // Por defecto aceptamos cualquier certificado y solo lo registramos (hello de diagnostico).
 // Compilar con -DPSB_STRICT_TLS para aceptar unicamente cuando verifyErr == 0.
@@ -130,6 +135,9 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
     out.rangeTotal = -1;
     out.stopped = false;
     out.sceError = 0;
+    out.retryAfterMs = 0;
+    out.cfChallenge = false;
+    out.server.clear();
     int tpl = 0, conn = 0, req = 0;
     bool ok = false;
     std::string encoding;  // Content-Encoding de la respuesta
@@ -139,7 +147,12 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
         psb_log("[http] %s fallo 0x%08X (%s)", stage, static_cast<unsigned>(code), url.c_str());
     };
 
-    tpl = sceHttpCreateTemplate(g_httpCtxId, g_netUserAgent.c_str(), ORBIS_HTTP_VERSION_1_1, 1);
+    std::string ua = g_netUserAgent;
+    {   // User-Agent propio del dominio (las verificaciones ataban la cookie al UA con el que se resolvieron)
+        std::string sch, host, pth;
+        if (url_split(url, sch, host, pth)) { const std::string o = ua_override_for(host); if (!o.empty()) ua = o; }
+    }
+    tpl = sceHttpCreateTemplate(g_httpCtxId, ua.c_str(), ORBIS_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { fail("createTemplate", tpl); tpl = 0; goto done; }
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);
@@ -149,7 +162,7 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
     // declara esta funcion sin parametros; la firma real es int sceHttpSetResponseHeaderMaxSize(int id, size_t size).
     {
         typedef int (*SetHdrMaxFn)(int, size_t);
-        int rc = reinterpret_cast<SetHdrMaxFn>(sceHttpSetResponseHeaderMaxSize)(tpl, kHeaderMax);
+        int rc = reinterpret_cast<SetHdrMaxFn>(sceHttpSetResponseHeaderMaxSize)(tpl, (sink || (extra && extra->rangeStart >= 0)) ? kHeaderMaxDl : kHeaderMax);
         static bool logged = false;
         if (!logged) { psb_log("[http] sceHttpSetResponseHeaderMaxSize(%zu) = 0x%08X", kHeaderMax, static_cast<unsigned>(rc)); logged = true; }
     }
@@ -184,6 +197,8 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
         if (!extra->referer.empty()) sceHttpAddRequestHeader(req, "Referer", extra->referer.c_str(), 0);
     }
     {
+        const std::string ck = cookies_header(url);
+        if (!ck.empty()) sceHttpAddRequestHeader(req, "Cookie", ck.c_str(), 0);
         int rc = post ? sceHttpSendRequest(req, post->body.data(), post->body.size()) : sceHttpSendRequest(req, nullptr, 0);
         if (rc < 0) { fail("sendRequest", rc); goto done; }
         int32_t status = 0;
@@ -197,6 +212,13 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
             out.contentType = headerValue(hdrs, hdrLen, "Content-Type");
             encoding = headerValue(hdrs, hdrLen, "Content-Encoding");
             out.contentDisposition = headerValue(hdrs, hdrLen, "Content-Disposition");
+            out.server = headerValue(hdrs, hdrLen, "Server");
+            out.cfChallenge = headerValue(hdrs, hdrLen, "cf-mitigated").find("challenge") != std::string::npos;
+            {   // Retry-After en segundos (la forma con fecha no se interpreta)
+                const std::string ra = headerValue(hdrs, hdrLen, "Retry-After");
+                out.retryAfterMs = (!ra.empty() && ra[0] >= '0' && ra[0] <= '9') ? std::min(120, atoi(ra.c_str())) * 1000 : 0;
+            }
+            cookies_store_from_headers(url, hdrs, hdrLen);
             {   // Content-Range: bytes 0-1048575/33496987
                 const std::string cr = headerValue(hdrs, hdrLen, "Content-Range");
                 const size_t sl = cr.rfind('/');

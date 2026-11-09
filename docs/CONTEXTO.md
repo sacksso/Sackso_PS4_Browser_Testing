@@ -1,8 +1,39 @@
 # Contexto del proyecto psbrowser (para continuar en otro chat o con otra IA)
 
 > Pega este documento al inicio de una conversación nueva junto con el zip del repo (y, si los tienes, el último `log.txt` y el zip `logs` del CI). Idioma de trabajo: **español**.
-> Última actualización: 8 de noviembre de 2026 (**v0.9.0 = presentación parcial + DOM/CSS lite/JavaScript (QuickJS) + motor de descargas por trozos + medidor de descargas; TODO sin probar en PS4**). El último log recibido es de **v0.8.3** (primera línea `== psbrowser v0.8.3 ==`). Las secciones numeradas §1–§11 y los bloques v0.8.x de más abajo son **históricos**: donde digan «sin JavaScript», «sin DOM/CSS» o «descargas de un solo flujo» ya no es cierto (ver el bloque v0.9.0). `docs/JS.md` es el plan original de JS (histórico); lo vigente está en `docs/V0.9.0.md`.
+> Última actualización: 9 de noviembre de 2026 (**v0.9.1 = correcciones del log + cookies + captchas en el PC, ver el primer bloque**; antes: v0.9.0 = presentación parcial + DOM/CSS lite/JavaScript (QuickJS) + motor de descargas por trozos + medidor de descargas; TODO sin probar en PS4**). El último log recibido es de **v0.8.3** (primera línea `== psbrowser v0.8.3 ==`). Las secciones numeradas §1–§11 y los bloques v0.8.x de más abajo son **históricos**: donde digan «sin JavaScript», «sin DOM/CSS» o «descargas de un solo flujo» ya no es cierto (ver el bloque v0.9.0). `docs/JS.md` es el plan original de JS (histórico); lo vigente está en `docs/V0.9.0.md`.
 
+---
+# >>> v0.9.1 (CORRECCIONES TRAS EL LOG DE v0.9.0 + COOKIES + CAPTCHAS RESUELTOS EN EL PC) - SIN PROBAR EN PS4 - leer primero <<<
+> 9-nov-2026. Detalle completo y tabla log→causa→arreglo en `docs/V0.9.1.md`. **Probado en PC (QuickJS real, jQuery real, ASan/UBSan/TSan); NO compilado con el toolchain real ni probado en consola.** El log recibido era de **v0.9.0** (primera linea `== psbrowser v0.9.0 (DOM+CSS+JS) ==`); el CI compilo bien (QuickJS incluido, sin `js_fallback.txt`).
+## Datos reales del log de v0.9.0 (PS4, WiFi)
+- JS: 196 errores `[js] ERROR`, casi todos por `document.implementation` ausente (jQuery) + `ShadowRoot`/`MediaError`/`crypto`/`NodeList`. Cargas con JS: 4-32 s (scripts de publicidad bajados uno a uno).
+- Descargas: `about:dlbench` en thinkbroadband: **1 conexion 0,65 MB/s, 2 → 1,29, 4 → 2,58** (escala casi lineal: limite por conexion); disco 110-130 MB/s (1 flujo) y ~70 (4 flujos). proof.ovh.net: **HTTP 429 con 2 conexiones** (`Retry-After: 10`). speed.hetzner.de: `sendRequest 0x804101E9`. **archive.org con `dlconn=6`: `sendRequest 0x809517D5` en bucle, 0,18 MB/s, fallo** (hipotesis: pools SSL/HTTP pequeños).
+- Navegacion: el usuario visita sitios que piden verificaciones (`Just a moment...` de Cloudflare en spankbang y timeextension, captchas en paginas de descarga de PKG, 1fichier, mocha...). El Set-Cookie llega en `[hdr]` (visible en archive.org) pero **no habia cookies**.
+## Que cambia
+1. **JS compat:** `document.implementation`, `DOMParser`, `ShadowRoot`, `NodeList/HTMLCollection`, `MediaError`, `crypto`, `TextEncoder/Decoder`, eventos extra, `attributes` con acceso por nombre; setInterval que falla se cancela a los 3 errores. `tools/tests/test_jsx_compat.cpp` (uso: `test_jsx_compat <jquery.js> ...`, jQuery 1.12.4/2.2.4/3.5.1/3.7.1 OK).
+2. **Red:** pools SSL 4 MB / HTTP 8 MB / NET 128 KB; cabeceras de 32 KB en descargas; `HttpResult` con `retryAfterMs`, `server`, `cfChallenge`.
+3. **Descargas:** `dlconn` = MAXIMO (1..12, por defecto **8**; ciclo de ajustes 1,2,4,6,8,12,0). Empieza con 2 y sube (ventanas de 4 s, +12 %); 429/503 no son fatales (espera `Retry-After`, baja a `en_curso-1`, aparca trabajadores). El medidor `about:dlbench` sigue con conexiones fijas.
+4. **Cookies:** `app/cookies.h/.cpp` (puro, probado), integrado en `netclient.cpp` (cabecera `Cookie`, `Set-Cookie`), `document.cookie`, `cookies.txt` Netscape, `cookies_import.txt` (se importa al arrancar y desde `about:cookies`), UA por dominio (`ua_overrides.txt`). Config nueva: `cookies`, `adblock`, `solver`.
+5. **Adblock + cache** de scripts/CSS en el host JS (`adBlocked()`, `g_assetCache` 24 MB, solo .js/.css).
+6. **Verificaciones:** `looksLikeChallenge()` / `pageHasCaptcha()` en `load()` → `about:verify` (F7) con los pasos; ayudante `tools/solver/psb_solver.py` (Playwright) con protocolo `/ping`, `/open?url=`, `/state` (`#UA`, `#DL`, cookies Netscape); `solverSync()/solverOpen()` en main.cpp. **El usuario resuelve a mano; nada automatico.**
+7. **Atajos:** F7, Ctrl+U (`about:source`), Ctrl+Mayus+Supr (`about:cookies`), Alt+D; comandos de la barra `!solver IP:puerto`, `!ua dominio UA`, `!cookies`, `!verify`, `!source`.
+## Riesgos (decirlos al usuario)
+Ver `docs/V0.9.1.md` → «Limites y riesgos». Los mas importantes: pools no probados en consola; el JS de Cloudflare/hCaptcha NO se ejecuta (por eso la via es el PC); `psb_solver.py` no probado con un navegador real; cookie `cf_clearance` atada a UA e IP publica.
+## Que pedir al usuario tras instalar
+1. Primera linea del log `== psbrowser v0.9.1 ==`; lineas `[net] listo` (que los pools nuevos no fallen) y `[cookies] N cookies cargadas`.
+2. Misma prueba de descarga que archive.org (la que fallo con 6): buscar `[dleng] velocidad total ... se sube a N` / `el servidor limita las conexiones` y la velocidad final `[dl] motor:`. Si sigue `0x809517D5`, devolver el log + zip `logs`.
+3. Paginas con jQuery (WordPress/erome): `[jsx] DOM ok, N scripts (K con error)` deberia bajar mucho; tiempos `ms`.
+4. Una pagina con verificacion de Cloudflare: F7 → `!solver` → flujo completo con `psb_solver.py` en el PC (instalar Playwright). Devolver el log (`[verify]`, `[solver]`, `[cookies]`) y si la pagina abre tras importar.
+## Git (v0.9.1)
+Archivos nuevos: `app/cookies.h/.cpp`, `tools/solver/*`, `tools/tests/test_cookies.cpp`, `test_jsx_compat.cpp`, `test_solver_state.cpp`, `docs/V0.9.1.md`. Cambiados: `app/main.cpp`, `app/netclient.*`, `app/dlengine.*`, `app/jsx.*`, `app/jsprelude.h`, `tools/tests/test_dlengine.cpp`, `tools/README.md`, `docs/*`. **El workflow NO cambia** (copia `app/*.cpp` y `app/*.h`).
+```bash
+cd Sackso_PS4_Browser_Testing-main
+git add -A app docs tools README.md
+git commit -m "v0.9.1: compat jQuery, cookies, descargas adaptativas, verificaciones resueltas en el PC"
+git push
+```
+Despues: Actions → **Build PKG** → *Run workflow* → instalar → probar.
 ---
 # >>> v0.9.0 (PRESENTACION PARCIAL + DOM/CSS/JS + MOTOR DE DESCARGAS + MEDIDOR) - SIN PROBAR EN PS4 - leer primero <<<
 > 8-nov-2026. Entregado como `psbrowser-v0_9_0.zip` (mismo nombre en dos entregas seguidas: **la segunda** ya incluye el motor de descargas, `app/dlengine.*`; si el zip del usuario no lo tiene, es la primera). **Nada de esto se ha compilado con el toolchain real ni probado en consola.** Lo que sí se hizo: compilación en PC con `g++`, pruebas con QuickJS real y servidor de descargas simulado (ASan/UBSan/TSan limpios) y `-fsyntax-only` de `main.cpp` con los stubs de `tools/stubs`.

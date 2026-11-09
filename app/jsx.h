@@ -15,6 +15,9 @@ struct JsHost {
     std::function<bool(const std::string& url, size_t maxBody, std::string& body, std::string& finalUrl, int& status, std::string& contentType)> fetch;
     std::function<void(const std::string& line)> log;
     std::function<uint32_t()> nowMs;
+    std::function<bool(const std::string& url)> blocked;          // true = no descargar este script/CSS (publicidad, rastreadores)
+    std::function<std::string(const std::string& url)> getCookies;           // document.cookie (sin HttpOnly)
+    std::function<void(const std::string& url, const std::string& cookie)> setCookie;
     std::function<std::string(const std::string& base, const std::string& ref)> resolve;
     std::string userAgent = "Mozilla/5.0 (PlayStation 4) AppleWebKit/605.1.15 (KHTML, like Gecko)";
 };

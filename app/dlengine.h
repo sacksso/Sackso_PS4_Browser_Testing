@@ -5,6 +5,8 @@
 //    corta, se cancela o se cierra el navegador, la siguiente descarga de la misma URL continua donde iba.
 //  - Un trozo que falla se reintenta desde el ultimo byte recibido (hasta 'retries' veces seguidas sin avanzar, con espera creciente).
 //  - 'conns' trabajadores toman trozos de una cola comun (se adaptan solos a la velocidad de cada conexion).
+//  - v0.9.1: 'conns' es un MAXIMO. Se empieza con 2 conexiones y se sube de una en una (o de dos en dos) mientras la velocidad total
+//    suba >=12 % por paso; ante HTTP 429/503 o errores de conexion se baja una conexion (con espera segun Retry-After) y se deja de subir.
 //  - Servidor sin soporte de Range (responde 200): se descarga en un solo flujo, como antes (sin reanudar).
 //  - Modo 'discard' (medidor about:dlbench): no escribe a disco; repite trozos durante 'benchMs' y cuenta los bytes.
 // Todo el acceso a red va por 'fetch' (inyectable): en la consola es netclient, en el PC una simulacion (tools/tests/test_dlengine.cpp).
@@ -21,6 +23,7 @@ struct DlFetchResult {
     std::string finalUrl, contentType, contentDisposition;
     int sceError = 0;
     std::string stage;
+    int retryAfterMs = 0;            // cabecera Retry-After de un 429/503 (0 = no vino)
 };
 struct DlChunkSink {
     virtual ~DlChunkSink() {}
@@ -33,13 +36,14 @@ typedef std::function<bool(const std::string& url, long long start, long long en
 struct DlParams {
     std::string url, dir, name, referer;
     long long knownTotal = -1;       // tamano ya conocido (cabeceras de la pagina de confirmacion), -1 si no
-    int conns = 1;                   // conexiones paralelas 1..8
+    int conns = 1;                   // conexiones paralelas, MAXIMO 1..12 (v0.9.1: empieza con 2 y sube sola mientras la velocidad total crezca; baja ante 429/errores)
     long long chunk = 16LL << 20;    // tamano de trozo
     int retries = 6;                 // reintentos seguidos sin avanzar antes de rendirse
     int backoffMs = 500;             // espera base entre reintentos (x intento, tope 4 s)
     bool resume = true;
     bool discard = false;            // medidor: no escribe, repite trozos hasta benchMs
     int benchMs = 0;
+    int rampMs = 4000;               // ventana de medida para subir/bajar conexiones (las pruebas la acortan)
     DlFetchFn fetch;
     std::function<bool(const DlFetchResult&)> accept;              // false = llego una pagina web en vez del archivo
     std::function<std::string(const DlFetchResult&)> pickPath;     // ruta final de una descarga NUEVA (la unica funcion que decide el nombre)
@@ -49,7 +53,7 @@ struct DlParams {
 enum class DlResult { RUNNING, OK, CANCELLED, NET_ERROR, DISK_ERROR, BAD_STATUS, HTML_INSTEAD };
 struct DlProgress2 {
     long long done = 0, total = -1;
-    int activeConns = 0, retryCount = 0;
+    int activeConns = 0, retryCount = 0, allowedConns = 1;
     long long queuedBytes = 0;
     bool resumed = false;
     long long resumedFrom = 0;

@@ -17,6 +17,7 @@ namespace {
 typedef std::chrono::steady_clock Clock;
 long long nowMs() { return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count(); }
 void sleepMs(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
+thread_local int tlRank = 0;   // posicion del trabajador (0 = el primero): los de rango >= 'allowed' se aparcan
 const size_t kFlushBuf = 2u * 1024 * 1024;  // cada trabajador junta 2 MB antes de encolar: menos saltos de cabeza en el HDD con varias conexiones
 
 struct Meta {
@@ -144,6 +145,9 @@ struct DlEngine::Impl {
     std::atomic<long long> done{0};
     std::atomic<bool> cancel{false}, fatal{false}, w0done{false}, fin{false};
     std::atomic<int> active{0}, retryCount{0};
+    std::atomic<int> allowed{1}, alive{0}, ceiling{1}, inflight{0};   // conexiones permitidas ahora / hilos vivos / techo (baja ante errores)
+    std::atomic<long long> lastDownAt{-100000};
+    std::atomic<bool> rampStopped{false};
     DlResult fatalResult = DlResult::NET_ERROR;
     std::string fstage;
     int fstatus = 0, fsce = 0;
@@ -208,6 +212,7 @@ struct DlEngine::Impl {
     // Cabeceras de una respuesta. false = abortar esta peticion (con 'fatal' o 'restartScratch' si procede).
     bool onHeaders(const DlFetchResult& r, long long start) {
         std::lock_guard<std::mutex> lk(mu);
+        if ((r.status == 429 || r.status == 503) && !P.discard) return false;  // limite temporal del servidor: lo reintenta runChunk (con espera y menos conexiones)
         if (r.status != 206 && r.status != 200) { setFatal(DlResult::BAD_STATUS, "", r.status, 0); fstatus = r.status; return false; }
         if (mode != M_UNKNOWN) {  // respuestas posteriores: deben seguir siendo coherentes
             if (mode == M_CHUNKED && r.status != 206) return false;                                      // dejo de respetar Range: se reintenta
@@ -277,8 +282,28 @@ struct DlEngine::Impl {
         return -1;
     }
 
-    // Descarga el trozo 'idx' con reintentos. true = completo (o fin por tiempo en el medidor).
-    bool runChunk(int idx) {
+    // El servidor rechazo una peticion que empezo cuando ya habia 'par' en curso (incluida ella): el limite es como mucho par-1.
+    // Se usa min(), asi varios fallos a la vez no encadenan bajadas de mas.
+    void throttleDown(const std::string& why, int par) {
+        if (P.discard || P.conns <= 1) return;
+        const int target = std::max(1, par - 1);
+        rampStopped = true;
+        const int a = allowed.load();
+        if (target < a) {
+            allowed = target;
+            if (target < ceiling.load()) ceiling = target;
+            lastDownAt = nowMs();
+            log("[dleng] el servidor limita las conexiones (" + why + "): " + std::to_string(a) + " -> " + std::to_string(target));
+        }
+    }
+    bool anyPending() {
+        std::lock_guard<std::mutex> lk(mu);
+        if (mode != M_CHUNKED) return false;
+        for (uint8_t v : st) if (v == 0) return true;
+        return false;
+    }
+    // Descarga el trozo 'idx' con reintentos. 1 = completo (o fin por tiempo en el medidor), 0 = fallo/cancelado, 2 = trozo devuelto a la cola (trabajador aparcado).
+    int runChunk(int idx) {
         const long long cstart = static_cast<long long>(idx) * chunk;
         long long got = 0;
         int attempts = 0;
@@ -301,13 +326,15 @@ struct DlEngine::Impl {
             const long long reqStart = md == M_STREAM200 ? 0 : cstart + got;
             Sink s(this, reqStart);
             DlFetchResult r;
+            const int par = ++inflight;   // peticiones en curso al empezar esta (incluida)
             const bool ok = P.fetch(url, reqStart, md == M_STREAM200 ? -1 : reqEnd, s, r);
+            --inflight;
             s.flush();
             lastSeq = std::max(lastSeq, s.lastSeq);
             got = md == M_STREAM200 ? s.next : (s.next - cstart);
             if (P.discard) { got = 0; }
-            if (cancel.load() || fatal.load() || restartScratch.load()) return false;
-            if (P.discard && (s.byDeadline || deadlinePassed())) return true;
+            if (cancel.load() || fatal.load() || restartScratch.load()) return 0;
+            if (P.discard && (s.byDeadline || deadlinePassed())) return 1;
             // ¿completo?
             bool complete = false;
             Mode m2;
@@ -332,20 +359,32 @@ struct DlEngine::Impl {
             if (complete) break;
             // fallo o respuesta corta: reintentar desde el ultimo byte recibido
             if (s.got > 0) attempts = 0;
-            if (++attempts > P.retries) { setFatal(DlResult::NET_ERROR, r.stage.empty() ? "descarga cortada" : r.stage, r.status, r.sceError); return false; }
+            if (++attempts > P.retries) { setFatal(DlResult::NET_ERROR, r.stage.empty() ? "descarga cortada" : r.stage, r.status, r.sceError); return 0; }
             retryCount++;
             log("[dleng] trozo " + std::to_string(idx) + ": reintento " + std::to_string(attempts) + "/" + std::to_string(P.retries) + " desde +" + std::to_string(got) +
                 " (" + (r.stage.empty() ? std::string("sin detalle") : r.stage) + ")");
             if (md == M_STREAM200) { got = 0; done = 0; }
             if (attempts >= 2) url = P.url;  // el enlace ya resuelto pudo caducar: volver a la URL original
-            const int wait = std::min(4000, P.backoffMs * attempts);
+            int wait = std::min(4000, P.backoffMs * attempts);
+            const bool limited = r.status == 429 || r.status == 503 || r.stage == "sendRequest" || r.stage == "createConnection" || r.stage == "connection";
+            if (limited && md == M_CHUNKED && P.conns > 1) {
+                throttleDown(r.status ? "HTTP " + std::to_string(r.status) : r.stage, par);
+                if (tlRank >= allowed.load()) {   // este trabajador sobra: devuelve el trozo y se aparca
+                    std::lock_guard<std::mutex> lk(mu);
+                    st[static_cast<size_t>(idx)] = 0;
+                    if (idx < nextIdx) nextIdx = idx;
+                    done -= got;
+                    return 2;
+                }
+            }
+            if (r.retryAfterMs > 0) wait = std::max(wait, std::min(r.retryAfterMs, 30000));
             for (int t = 0; t < wait && !cancel.load(); t += 50) sleepMs(50);
-            if (cancel.load()) return false;
+            if (cancel.load()) return 0;
         }
-        if (P.discard) return true;
+        if (P.discard) return 1;
         Mode m3;
         { std::lock_guard<std::mutex> lk(mu); m3 = mode; }
-        if (m3 == M_CHUNKED && lastSeq > 0 && !w.waitWritten(lastSeq)) { setFatal(DlResult::DISK_ERROR, "disco", 0, 0); return false; }  // sin el cerrojo: puede tardar
+        if (m3 == M_CHUNKED && lastSeq > 0 && !w.waitWritten(lastSeq)) { setFatal(DlResult::DISK_ERROR, "disco", 0, 0); return 0; }  // sin el cerrojo: puede tardar
         std::lock_guard<std::mutex> lk(mu);
         if (m3 == M_CHUNKED) {
             st[static_cast<size_t>(idx)] = 2;
@@ -353,18 +392,27 @@ struct DlEngine::Impl {
         } else {
             completedOpen = true;
         }
-        return true;
+        return 1;
     }
 
-    void workerMain(bool first) {
+    void workerMain(bool first, int rank) {
+        tlRank = rank;
         ++active;
         for (;;) {
+            // aparcado: este trabajador sobra por ahora (el servidor limito las conexiones o la subida gradual aun no llego a el)
+            while (rank >= allowed.load() && !cancel.load() && !fatal.load() && !restartScratch.load() && !P.discard) {
+                if (!anyPending()) break;
+                sleepMs(100);
+            }
+            if (rank >= allowed.load() && !P.discard && !anyPending()) break;
             const int idx = claimChunk();
             if (idx < 0) break;
-            if (!runChunk(idx)) break;
+            const int rc = runChunk(idx);
+            if (rc == 0) break;
             { std::lock_guard<std::mutex> lk(mu); if (mode != M_CHUNKED) break; }
         }
         --active;
+        --alive;
         if (first) w0done = true;
     }
 
@@ -485,7 +533,8 @@ struct DlEngine::Impl {
                 fin = true;
                 return;
             }
-            workers.emplace_back([this] { workerMain(true); });
+            alive = 1;
+            workers.emplace_back([this] { workerMain(true, 0); });
             while (!headersReady && !w0done.load() && !cancel.load() && !fatal.load()) sleepMs(5);
             int n = 1;
             {
@@ -494,11 +543,42 @@ struct DlEngine::Impl {
                     int pending = 0;
                     for (uint8_t v : st) if (v == 0) pending++;
                     if (P.discard) pending = P.conns;
-                    n = std::max(1, std::min({P.conns, 8, pending + 1}));
+                    n = std::max(1, std::min({P.conns, 12, pending + 1}));
                 }
             }
-            for (int i = 1; i < n; i++) workers.emplace_back([this] { workerMain(false); });
+            ceiling = n;
+            allowed = P.discard ? n : std::min(n, 2);   // el medidor usa un numero fijo; las descargas empiezan con 2 y suben
+            for (int i = 1; i < n; i++) { ++alive; workers.emplace_back([this, i] { workerMain(false, i); }); }
             connsUsed = n;
+            // supervision: subida gradual mientras la velocidad total crezca (ventanas de 4 s)
+            {
+                long long lastT = nowMs(), lastDone = done.load();
+                double prev = -1;
+                while (alive.load() > 0 && !cancel.load() && !fatal.load()) {
+                    sleepMs(200);
+                    if (P.discard || rampStopped.load() || n <= 1) continue;
+                    const long long t = nowMs();
+                    if (t - lastT < P.rampMs) continue;
+                    const long long d = done.load();
+                    const double sp = static_cast<double>(d - lastDone) * 1000.0 / static_cast<double>(t - lastT);
+                    lastT = t; lastDone = d;
+                    const int a = allowed.load();
+                    if (!anyPending()) { rampStopped = true; continue; }   // ya no quedan trozos que repartir
+                    if (prev < 0 || sp > prev * 1.12) {
+                        if (a < ceiling.load()) {
+                            const int na = std::min(ceiling.load(), a + (a >= 3 ? 2 : 1));
+                            allowed = na;
+                            log("[dleng] velocidad total " + std::to_string(static_cast<int>(sp / 1024)) + " KB/s con " + std::to_string(a) + " conexion(es): se sube a " + std::to_string(na));
+                        } else rampStopped = true;
+                        prev = sp;
+                    } else {
+                        if (sp < prev * 0.95 && a > 1) { allowed = a - 1; log("[dleng] mas conexiones no aceleran (" + std::to_string(static_cast<int>(sp / 1024)) + " KB/s): se vuelve a " + std::to_string(a - 1)); }
+                        else log("[dleng] la velocidad ya no sube con mas conexiones (" + std::to_string(static_cast<int>(sp / 1024)) + " KB/s con " + std::to_string(a) + "): se mantiene");
+                        rampStopped = true;
+                    }
+                }
+            }
+            allowed = std::max(allowed.load(), 1);
             for (auto& t : workers) t.join();
             workers.clear();
             if (restartScratch.load() && attempt == 0 && !cancel.load()) {
@@ -521,7 +601,7 @@ bool DlEngine::start(const DlParams& p) {
     Impl& e = *d_;
     if (!p.fetch || p.dir.empty()) return false;
     e.P = p;
-    e.P.conns = std::max(1, std::min(8, p.conns));
+    e.P.conns = std::max(1, std::min(12, p.conns));
     e.chunk = std::max<long long>(1 << 20, p.chunk);
     e.P.chunk = e.chunk;
     e.t0 = nowMs();
@@ -536,6 +616,7 @@ DlProgress2 DlEngine::progress() const {
     DlProgress2 p;
     p.done = e.done.load();
     p.activeConns = e.active.load();
+    p.allowedConns = e.allowed.load();
     p.retryCount = e.retryCount.load();
     p.queuedBytes = e.w.queued();
     p.resumed = e.resumed;

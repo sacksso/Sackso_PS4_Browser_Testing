@@ -37,6 +37,7 @@ struct Timer {
     uint32_t due = 0;
     int interval = -1;  // >= 0: repetir
     bool raf = false;
+    int errors = 0;     // errores seguidos de un intervalo: a los 3 se cancela
 #ifndef PSB_NO_JS
     JSValue fn = JS_UNDEFINED;
 #endif
@@ -51,6 +52,7 @@ struct Session {
     int nextTimer = 1;
     int fetches = 0;
     int domFetchBudget = 12;
+    int timerErrLogged = 0;
     DomNode* curScript = nullptr;
     std::vector<Timer> timers;
     std::string status;
@@ -220,6 +222,8 @@ FN(n_clearTimer) {
     return JS_UNDEFINED;
 }
 FN(n_url) { NEED(0); return jnewstr(c, g_s->url); }
+FN(n_cookieGet) { NEED(0); if (!g_host.getCookies) return JS_NULL; return jnewstr(c, g_host.getCookies(g_s->url)); }
+FN(n_cookieSet) { NEED(1); if (g_host.setCookie) g_host.setCookie(g_s->url, jstr(c, argv[0])); return JS_UNDEFINED; }
 FN(n_ua) { NEED(0); return jnewstr(c, g_host.userAgent); }
 FN(n_resolve) { NEED(2); return jnewstr(c, g_host.resolve ? g_host.resolve(jstr(c, argv[0]), jstr(c, argv[1])) : jstr(c, argv[1])); }
 FN(n_fetchSync) {
@@ -293,7 +297,7 @@ static void setupEngine(Session* s) {
     R(D, head, 0); R(D, body, 0); R(D, currentScript, 0); R(D, write, 1);
 #undef R
 #define R(o, nm, len) regFns(c, o, #nm, n_##nm, len)
-    R(N, log, 2); R(N, now, 0); R(N, setTimer, 3); R(N, raf, 1); R(N, clearTimer, 1); R(N, url, 0); R(N, ua, 0); R(N, resolve, 2); R(N, fetchSync, 2);
+    R(N, log, 2); R(N, now, 0); R(N, setTimer, 3); R(N, raf, 1); R(N, clearTimer, 1); R(N, url, 0); R(N, cookieGet, 0); R(N, cookieSet, 1); R(N, ua, 0); R(N, resolve, 2); R(N, fetchSync, 2);
 #undef R
     JS_SetPropertyStr(c, G, "__d", D);
     JS_SetPropertyStr(c, G, "__n", N);
@@ -346,6 +350,7 @@ std::string jsx_load(const std::string& url, const std::string& html, bool runJs
             if (n >= 5) break;
             const std::string abs = g_host.resolve ? g_host.resolve(url, href) : href;
             if (abs.compare(0, 4, "http") != 0) continue;
+            if (g_host.blocked && g_host.blocked(abs)) continue;
             std::string body, fin, ct;
             int status = 0;
             if (g_host.fetch(abs, 400 * 1024, body, fin, status, ct) && status == 200 && !body.empty()) { s->dom.addStyleSheet(body); n++; hlog("[css] " + abs + " (" + std::to_string(body.size()) + " bytes)"); }
@@ -377,6 +382,7 @@ std::string jsx_load(const std::string& url, const std::string& html, bool runJs
                 if (ext >= g_s->domFetchBudget || !g_host.fetch) continue;
                 const std::string abs = g_host.resolve ? g_host.resolve(url, *src) : *src;
                 if (abs.compare(0, 4, "http") != 0) continue;
+                if (g_host.blocked && g_host.blocked(abs)) { hlog("[js] bloqueado (publicidad/rastreo): " + abs); continue; }
                 std::string fin, ct;
                 int status = 0;
                 const uint32_t t = hnow();
@@ -454,7 +460,19 @@ bool jsx_pump(void* owner, uint32_t now, std::string* outHtml) {
         }
         s->deadline = hnow() + 250;
         JSValue r = JS_Call(s->ctx, t.fn, JS_UNDEFINED, 0, nullptr);
-        if (JS_IsException(r)) logException(s->ctx, "temporizador"); else JS_FreeValue(s->ctx, r);
+        if (JS_IsException(r)) {
+            if (s->timerErrLogged < 12) { logException(s->ctx, "temporizador"); s->timerErrLogged++; }
+            else { JSValue ex = JS_GetException(s->ctx); JS_FreeValue(s->ctx, ex); if (s->timerErrLogged++ == 12) hlog("[js] (se omiten los siguientes errores de temporizador)"); }
+            if (t.interval >= 0) {  // un setInterval que falla siempre se cancela a los 3 errores seguidos
+                for (Timer& x : s->timers) if (x.id == t.id) {
+                    if (++x.errors >= 3) { JS_FreeValue(s->ctx, x.fn); x.fn = JS_UNDEFINED; x.id = -1; hlog("[js] intervalo cancelado tras 3 errores seguidos"); }
+                    break;
+                }
+            }
+        } else {
+            JS_FreeValue(s->ctx, r);
+            if (t.interval >= 0) for (Timer& x : s->timers) if (x.id == t.id) { x.errors = 0; break; }
+        }
         JS_FreeValue(s->ctx, t.fn);
         drainJobs(s);
         ran++;

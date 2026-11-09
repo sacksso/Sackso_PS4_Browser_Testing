@@ -28,6 +28,8 @@ struct Server {
     std::atomic<int> reqs{0};
     std::atomic<long long> served{0};
     std::atomic<int> maxParallel{0}, parallel{0};
+    int limitParallel = 0;     // >0: con mas peticiones simultaneas responde 429 (Retry-After 1 s)
+    std::atomic<int> rejected{0};
 };
 static DlFetchFn makeFetch(Server& S) {
     return [&S](const std::string& url, long long start, long long end, DlChunkSink& sink, DlFetchResult& r) {
@@ -38,6 +40,7 @@ static DlFetchFn makeFetch(Server& S) {
         struct Dec { Server& s; ~Dec() { --s.parallel; } } dec{S};
         r = DlFetchResult();
         r.finalUrl = url;
+        if (S.limitParallel > 0 && par > S.limitParallel) { ++S.rejected; r.status = 429; r.retryAfterMs = 120; sink.begin(r); r.stage = "cancelado"; return false; }
         if (S.status != 206 && S.status != 200) { r.status = S.status; sink.begin(r); r.stage = "cancelado"; return false; }
         const bool useRange = S.range;
         if (!useRange) { start = 0; end = S.size - 1; r.status = 200; r.contentLength = S.size; }
@@ -176,6 +179,36 @@ int main() {
         Server S; S.size = 300000; std::string d = fresh();
         DlEngine e; DlOutcome o = runWait(e, base(S, d, 4));
         CHECK(o.result == DlResult::OK); CHECK(verify(d + "/f.bin", S.size));
+    }
+    {
+        printf("[10] servidor que solo admite 3 conexiones (429 con mas): el motor baja solo y termina bien\n");
+        Server S; S.size = 160LL << 20; S.limitParallel = 3; S.slowUs = 400; std::string d = fresh();
+        DlParams p = base(S, d, 8); p.rampMs = 250; p.backoffMs = 10;
+        DlEngine e; DlOutcome o = runWait(e, p);
+        if (o.result != DlResult::OK) printf("   resultado=%d stage=%s status=%d sce=%d\n", (int)o.result, o.stage.c_str(), o.status, o.sceError);
+        CHECK(o.result == DlResult::OK); CHECK(verify(d + "/f.bin", S.size));
+        printf("   rechazadas=%d maxParalelo=%d permitidas al final=%d\n", S.rejected.load(), S.maxParallel.load(), e.progress().allowedConns);
+        if (S.maxParallel.load() > 3) { CHECK(S.rejected.load() > 0); CHECK(e.progress().allowedConns <= 3); }   // (con TSan va tan lento que no llega a pasar de 3)
+        CHECK(e.progress().allowedConns >= 1);
+    }
+    {
+        printf("[11] servidor sin limite donde cada conexion va a su ritmo: sube de 2 a mas conexiones\n");
+        Server S; S.size = 200LL << 20; S.slowUs = 1500; std::string d = fresh();
+        DlParams p = base(S, d, 6); p.rampMs = 300;
+        DlEngine e; DlOutcome o = runWait(e, p);
+        CHECK(o.result == DlResult::OK); CHECK(verify(d + "/f.bin", S.size));
+        printf("   maxParalelo=%d permitidas al final=%d\n", S.maxParallel.load(), e.progress().allowedConns);
+        CHECK(S.maxParallel.load() >= 3);
+        CHECK(S.maxParallel.load() <= 6);
+    }
+    {
+        printf("[12] cancelar con trabajadores aparcados no se cuelga\n");
+        Server S; S.size = 160LL << 20; S.limitParallel = 2; S.slowUs = 4000; std::string d = fresh();
+        DlParams p = base(S, d, 8); p.rampMs = 200;
+        DlEngine e; e.start(p);
+        std::this_thread::sleep_for(std::chrono::milliseconds(900));
+        e.cancel(); e.join();
+        CHECK(e.outcome().result == DlResult::CANCELLED);
     }
     printf(fails ? "\n%d FALLOS\n" : "\nTODO OK\n", fails);
     std::string cmd = "rm -rf " + root; (void)!system(cmd.c_str());
