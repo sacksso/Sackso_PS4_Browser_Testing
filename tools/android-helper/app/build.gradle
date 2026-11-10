@@ -1,0 +1,23 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.github.sacksso.psbhelper'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'io.github.sacksso.psbhelper'
+        minSdk 26
+        targetSdk 33          // 33: no exige declarar el tipo del servicio en primer plano (Android 14); la app se instala por APK, no por Play
+        versionCode 1
+        versionName '0.1.0'
+    }
+    buildTypes {
+        release { minifyEnabled false }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
