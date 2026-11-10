@@ -3,6 +3,21 @@
 > Pega este documento al inicio de una conversación nueva junto con el zip del repo, `PLAN_MAESTRO.md` (si lo tienes) y el último `log.txt` y zip `logs` del CI. Idioma de trabajo: **español**.
 > Última actualización: 9 de noviembre de 2026, noche (resultados de v0.9.5 en PS4 + sonda Piglet; antes: **v0.9.5, tandas 1 y 2: sondeo SDL/GPU + opción `gpu` + Canvas 2D + modo juego**). Versiones v0.9.0–v0.9.5: **ninguna probada aún en PS4 salvo el log de v0.9.0/0.9.1 ya analizado**; v0.9.3 y v0.9.4 no se han compilado en el CI ni probado. El último log recibido es de v0.9.1. Las secciones numeradas §1–§11 y los bloques v0.8.x de más abajo son **históricos**: donde digan «sin JavaScript», «sin DOM/CSS» o «descargas de un solo flujo» ya no es cierto. Lo vigente por versión está en `docs/V0.9.x.md`; el plan por fases en `PLAN_MAESTRO.md`.
 
+# >>> v0.9.6 (COMPATIBILIDAD JS PARA JUEGOS + SONDAS CI) - SIN PROBAR EN PS4 - leer primero <<<
+> 9-nov-2026, noche. Detalle en `docs/V0.9.6.md`. Solo cambia el prelude JS (NodeFilter/TreeWalker/NodeIterator, Path2D, audio silencioso con `AudioContext` stub, stubs de pantalla completa), `tools/tests/test_prelude_v096.js`, la cadena de version y el workflow (sondas). Probado en PC con node (NO con QuickJS real).
+## Que pedir al usuario tras instalar
+1. Zip `logs` del CI con `probe_sdl` marcado: **`piglet_probe.txt`** (lo necesito para el renderer GPU `gpu=2`) y `sdl_probe.txt`.
+2. `log.txt`: primera linea `== psbrowser v0.9.6 ...`; si hay `[js] ERROR`, ver si desaparecieron `NodeFilter is not defined`; probar un juego sencillo de friv y devolver `[game]`/`[canvas]` + que se vio.
+3. Si un sitio que antes iba deja de ir: sospechar del `AudioContext` stub (ver V0.9.6.md).
+## Git (v0.9.6)
+```bash
+cd Sackso_PS4_Browser_Testing-main
+git add app/jsprelude.h app/main.cpp tools/tests/test_prelude_v096.js .github/workflows/build-pkg.yml docs
+git commit -m "v0.9.6: compat JS para juegos (TreeWalker, Path2D, audio stub) y sondas CI"
+git push
+```
+Luego Actions -> Build PKG -> Run workflow con `probe_sdl` y `js_engine` marcados.
+---
 # >>> RESULTADOS v0.9.5 EN PS4 (9-nov-2026, noche) + SONDA PIGLET <<<
 > El usuario instalo v0.9.5 (compila: el CI no cayo a `js_fallback`/`canvas_fallback`) y devolvio `log.txt` + zip `logs`.
 ## Hechos medidos

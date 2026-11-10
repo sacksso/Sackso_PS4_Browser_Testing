@@ -531,6 +531,112 @@ G.AbortController = class AbortController { constructor() { this.signal = { abor
 // ---- fin stubs v0.9.4
 
 
+// ---------------------------------------------------------------- v0.9.6: NodeFilter/TreeWalker, Path2D, audio silencioso, pantalla completa
+(function () {
+  const def = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, enumerable: false, configurable: true });
+  G.NodeFilter = { FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3, SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 1, SHOW_ATTRIBUTE: 2, SHOW_TEXT: 4, SHOW_CDATA_SECTION: 8, SHOW_PROCESSING_INSTRUCTION: 64, SHOW_COMMENT: 128, SHOW_DOCUMENT: 256, SHOW_DOCUMENT_TYPE: 512, SHOW_DOCUMENT_FRAGMENT: 1024 };
+  const kids = n => (n && n.childNodes) ? Array.from(n.childNodes) : [];
+  const accept = (n, what, f) => {
+    if (!(what & (1 << ((n.nodeType | 0) - 1)))) return 3;
+    if (!f) return 1;
+    const r = typeof f === 'function' ? f(n) : (f.acceptNode ? f.acceptNode(n) : 1);
+    return r === 2 || r === 3 ? r : 1;
+  };
+  const nextAfter = (n, root, skipKids) => {
+    if (!skipKids) { const k = kids(n); if (k.length) return k[0]; }
+    while (n && n !== root) {
+      const p = n.parentNode; if (!p) return null;
+      const sib = kids(p), i = sib.indexOf(n);
+      if (i >= 0 && i + 1 < sib.length) return sib[i + 1];
+      n = p;
+    }
+    return null;
+  };
+  const prevOf = (n, root) => {
+    if (!n || n === root) return null;
+    const p = n.parentNode; if (!p) return null;
+    const sib = kids(p), i = sib.indexOf(n);
+    if (i > 0) { let m = sib[i - 1], k; while ((k = kids(m)).length) m = k[k.length - 1]; return m; }
+    return p;
+  };
+  // Simplificado: filter se evalua al visitar; FILTER_REJECT salta el subarbol solo en nextNode.
+  class TreeWalker {
+    constructor(root, what, filter) { def(this, 'root', root); def(this, 'whatToShow', what === undefined ? 0xFFFFFFFF : what >>> 0); def(this, 'filter', filter || null); this.currentNode = root; }
+    nextNode() { let n = this.currentNode, skip = false; for (;;) { n = nextAfter(n, this.root, skip); if (!n) return null; const r = accept(n, this.whatToShow, this.filter); if (r === 1) { this.currentNode = n; return n; } skip = r === 2; } }
+    previousNode() { let n = this.currentNode; for (;;) { n = prevOf(n, this.root); if (!n) return null; if (accept(n, this.whatToShow, this.filter) === 1) { this.currentNode = n; return n; } } }
+    parentNode() { let n = this.currentNode; while (n && n !== this.root) { n = n.parentNode; if (n && accept(n, this.whatToShow, this.filter) === 1) { this.currentNode = n; return n; } } return null; }
+    firstChild() { for (const c of kids(this.currentNode)) if (accept(c, this.whatToShow, this.filter) === 1) { this.currentNode = c; return c; } return null; }
+    lastChild() { const k = kids(this.currentNode); for (let i = k.length - 1; i >= 0; i--) if (accept(k[i], this.whatToShow, this.filter) === 1) { this.currentNode = k[i]; return k[i]; } return null; }
+    nextSibling() { const n = this.currentNode, p = n && n.parentNode; if (!p || n === this.root) return null; const k = kids(p); for (let i = k.indexOf(n) + 1; i > 0 && i < k.length; i++) if (accept(k[i], this.whatToShow, this.filter) === 1) { this.currentNode = k[i]; return k[i]; } return null; }
+    previousSibling() { const n = this.currentNode, p = n && n.parentNode; if (!p || n === this.root) return null; const k = kids(p); for (let i = k.indexOf(n) - 1; i >= 0; i--) if (accept(k[i], this.whatToShow, this.filter) === 1) { this.currentNode = k[i]; return k[i]; } return null; }
+  }
+  // NodeIterator: instantanea del arbol al primer uso (no es "viva").
+  class NodeIterator {
+    constructor(root, what, filter) { def(this, 'root', root); def(this, 'whatToShow', what === undefined ? 0xFFFFFFFF : what >>> 0); def(this, 'filter', filter || null); def(this, '__list', null); def(this, '__i', -1); this.referenceNode = root; this.pointerBeforeReferenceNode = true; }
+    __build() { if (this.__list) return; const out = []; let n = this.root; for (;;) { const r = n === this.root ? accept(n, this.whatToShow, this.filter) : accept(n, this.whatToShow, this.filter); if (r === 1) out.push(n); n = nextAfter(n, this.root, r === 2); if (!n) break; } this.__list = out; }
+    nextNode() { this.__build(); if (this.__i + 1 >= this.__list.length) return null; this.__i++; return (this.referenceNode = this.__list[this.__i]); }
+    previousNode() { this.__build(); if (this.__i <= 0) return null; this.__i--; return (this.referenceNode = this.__list[this.__i]); }
+    detach() {}
+  }
+  G.TreeWalker = TreeWalker; G.NodeIterator = NodeIterator;
+  Document.prototype.createTreeWalker = function (root, what, filter) { return new TreeWalker(root, what, filter); };
+  Document.prototype.createNodeIterator = function (root, what, filter) { return new NodeIterator(root, what, filter); };
+
+  // Path2D: se graba y se repite al llamar a ctx.fill(path)/stroke(path)/clip(path) (ver bloque Canvas 2D).
+  class Path2D {
+    constructor(p) { def(this, '__ops', p instanceof Path2D ? p.__ops.slice() : []); }
+    addPath(p) { if (p instanceof Path2D) this.__ops.push(...p.__ops); }
+  }
+  for (const m of ['moveTo', 'lineTo', 'quadraticCurveTo', 'bezierCurveTo', 'arc', 'arcTo', 'ellipse', 'rect', 'roundRect', 'closePath']) Path2D.prototype[m] = function (...a) { this.__ops.push([m, a]); };
+  G.Path2D = Path2D;
+
+  // Audio SIN SONIDO: las paginas/juegos que cargan sonidos no se quedan esperando ni fallan. No hay salida de audio para JS.
+  const fire = (el, names) => { let d = 0; for (const n of names) G.setTimeout(() => { try { el.dispatchEvent(new G.Event(n)); const h = el['on' + n]; if (typeof h === 'function') h.call(el, new G.Event(n)); } catch (e) {} }, d += 1); };
+  const E = Element.prototype;
+  if (!('canPlayType' in E)) E.canPlayType = function () { return ''; };
+  if (!('readyState' in E)) Object.defineProperty(E, 'readyState', { get() { return (this.localName === 'audio' || this.localName === 'video') ? 4 : undefined; }, configurable: true });
+  if (!('ended' in E)) Object.defineProperty(E, 'ended', { get() { return false; }, configurable: true });
+  if (!('playbackRate' in E)) Object.defineProperty(E, 'playbackRate', { get() { return 1; }, set(v) {}, configurable: true });
+  const origLoad = E.load;
+  E.load = function () { if (this.localName === 'audio') fire(this, ['loadstart', 'loadeddata', 'canplay', 'canplaythrough']); return origLoad ? origLoad.call(this) : undefined; };
+  G.Audio = function (src) { const a = document.createElement('audio'); if (src) { a.setAttribute('src', src); fire(a, ['loadstart', 'loadeddata', 'canplay', 'canplaythrough']); } return a; };
+  const fakeBuf = (n, sr) => ({ length: n | 0, sampleRate: sr || 44100, numberOfChannels: 2, duration: (n | 0) / (sr || 44100), getChannelData: () => new Float32Array(n | 0), copyFromChannel() {}, copyToChannel() {} });
+  const param = (v) => ({ value: v === undefined ? 1 : v, defaultValue: v === undefined ? 1 : v, setValueAtTime() { return this; }, linearRampToValueAtTime() { return this; }, exponentialRampToValueAtTime() { return this; }, setTargetAtTime() { return this; }, cancelScheduledValues() { return this; } });
+  const node = (extra) => Object.assign({ connect(x) { return x; }, disconnect() {}, addEventListener() {}, removeEventListener() {}, start() {}, stop() {} }, extra || {});
+  class AudioContext {
+    constructor() { this.state = 'running'; this.sampleRate = 44100; this.currentTime = 0; this.destination = node({ maxChannelCount: 2 }); this.listener = {}; this.onstatechange = null; }
+    createGain() { return node({ gain: param(1) }); }
+    createOscillator() { return node({ frequency: param(440), detune: param(0), type: 'sine', setPeriodicWave() {} }); }
+    createBufferSource() { return node({ buffer: null, loop: false, playbackRate: param(1), detune: param(0), onended: null }); }
+    createBuffer(c, n, sr) { return fakeBuf(n, sr); }
+    createAnalyser() { return node({ fftSize: 2048, frequencyBinCount: 1024, getByteFrequencyData() {}, getByteTimeDomainData() {}, getFloatFrequencyData() {}, getFloatTimeDomainData() {} }); }
+    createBiquadFilter() { return node({ type: 'lowpass', frequency: param(350), Q: param(1), gain: param(0) }); }
+    createDynamicsCompressor() { return node({ threshold: param(-24), knee: param(30), ratio: param(12), attack: param(0.003), release: param(0.25) }); }
+    createStereoPanner() { return node({ pan: param(0) }); }
+    createPanner() { return node({ positionX: param(0), positionY: param(0), positionZ: param(0), setPosition() {} }); }
+    createDelay() { return node({ delayTime: param(0) }); }
+    createConvolver() { return node({ buffer: null }); }
+    createScriptProcessor() { return node({ onaudioprocess: null }); }
+    createMediaElementSource() { return node(); }
+    decodeAudioData(data, ok, err) { const b = fakeBuf(44100, 44100); if (typeof ok === 'function') G.setTimeout(() => ok(b), 1); return Promise.resolve(b); }
+    resume() { return Promise.resolve(); } suspend() { return Promise.resolve(); } close() { return Promise.resolve(); }
+    addEventListener() {} removeEventListener() {}
+  }
+  G.AudioContext = AudioContext; G.webkitAudioContext = AudioContext; G.OfflineAudioContext = undefined;
+
+  // Pantalla completa / orientacion / vibracion: no hacen nada, pero las paginas no fallan al llamarlas.
+  if (!E.requestFullscreen) E.requestFullscreen = function () { return Promise.resolve(); };
+  E.webkitRequestFullscreen = E.requestFullscreen; E.requestPointerLock = function () {}; 
+  const Dp = Document.prototype;
+  if (!('fullscreenEnabled' in Dp)) Object.defineProperty(Dp, 'fullscreenEnabled', { get() { return false; }, configurable: true });
+  if (!('fullscreenElement' in Dp)) Object.defineProperty(Dp, 'fullscreenElement', { get() { return null; }, configurable: true });
+  if (!Dp.exitFullscreen) Dp.exitFullscreen = function () { return Promise.resolve(); };
+  if (!Dp.exitPointerLock) Dp.exitPointerLock = function () {};
+  if (G.navigator && !G.navigator.vibrate) G.navigator.vibrate = () => false;
+  if (G.screen && G.screen.orientation && !G.screen.orientation.lock) { G.screen.orientation.lock = () => Promise.resolve(); G.screen.orientation.unlock = () => {}; }
+})();
+// ---- fin v0.9.6
+
 // ---- Canvas 2D (v0.9.5): getContext('2d') sobre el rasterizador nativo __c (app/canvas2d.cpp). Sin __c (PSB_NO_CANVAS) getContext sigue devolviendo null.
 (function () {
   const C = G.__c;
@@ -576,7 +682,10 @@ G.AbortController = class AbortController { constructor() { this.signal = { abor
       const P = Math.PI; this.moveTo(x + r, y); this.lineTo(x + w - r, y); this.arc(x + w - r, y + r, r, -P / 2, 0); this.lineTo(x + w, y + h - r); this.arc(x + w - r, y + h - r, r, 0, P / 2);
       this.lineTo(x + r, y + h); this.arc(x + r, y + h - r, r, P / 2, P); this.lineTo(x, y + r); this.arc(x + r, y + r, r, P, 3 * P / 2); this.closePath();
     }
-    fill(rule) { C.op(this.__id, O.FILL, rule === 'evenodd' ? 1 : 0); } stroke() { C.op(this.__id, O.STROKE); } clip() { C.op(this.__id, O.CLIP); }
+    __replay(p) { C.op(this.__id, O.BEGINPATH); for (const o of p.__ops) this[o[0]](...o[1]); }
+    fill(a, b) { let rule = a; if (a instanceof G.Path2D) { this.__replay(a); rule = b; } C.op(this.__id, O.FILL, rule === 'evenodd' ? 1 : 0); }
+    stroke(p) { if (p instanceof G.Path2D) this.__replay(p); C.op(this.__id, O.STROKE); }
+    clip(a, b) { if (a instanceof G.Path2D) this.__replay(a); C.op(this.__id, O.CLIP); }
     fillRect(x, y, w, h) { C.op(this.__id, O.FILLRECT, x, y, w, h); } strokeRect(x, y, w, h) { C.op(this.__id, O.STROKERECT, x, y, w, h); } clearRect(x, y, w, h) { C.op(this.__id, O.CLEARRECT, x, y, w, h); }
     translate(x, y) { C.op(this.__id, O.TRANSLATE, x, y); } scale(x, y) { C.op(this.__id, O.SCALE, x, y); } rotate(a) { C.op(this.__id, O.ROTATE, a); }
     transform(a, b, c, d, e, f) { C.op(this.__id, O.TRANSFORM, a, b, c, d, e, f); } setTransform(a, b, c, d, e, f) { if (a && typeof a === 'object') { C.op(this.__id, O.SETTRANSFORM, a.a, a.b, a.c, a.d, a.e, a.f); } else if (arguments.length === 0) C.op(this.__id, O.RESETTRANSFORM); else C.op(this.__id, O.SETTRANSFORM, a, b, c, d, e, f); }

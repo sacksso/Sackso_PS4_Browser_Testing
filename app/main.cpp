@@ -3737,7 +3737,7 @@ static SDL_Renderer* createRenderer(SDL_Window* win) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.9.5 (DOM+CSS+JS+Canvas2D+GPU probe) ==");
+    psb_log("== psbrowser v0.9.6 (DOM+CSS+JS+Canvas2D+GPU probe) ==");
     psb_log("[jsx] motor JS: %s | js=%d uipart=%d", jsx_has_engine() ? "QuickJS" : "no incluido", g_cfg.js, g_cfg.uipart ? 1 : 0);
     configLoad();
     cookies_load();
