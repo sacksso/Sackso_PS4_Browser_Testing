@@ -1,8 +1,33 @@
 # Contexto del proyecto psbrowser (para continuar en otro chat o con otra IA)
 
 > Pega este documento al inicio de una conversación nueva junto con el zip del repo, `PLAN_MAESTRO.md` (si lo tienes) y el último `log.txt` y zip `logs` del CI. Idioma de trabajo: **español**.
-> Última actualización: 9 de noviembre de 2026 (**v0.9.5, tandas 1 y 2: sondeo SDL/GPU + opción `gpu` + Canvas 2D + modo juego**). Versiones v0.9.0–v0.9.5: **ninguna probada aún en PS4 salvo el log de v0.9.0/0.9.1 ya analizado**; v0.9.3 y v0.9.4 no se han compilado en el CI ni probado. El último log recibido es de v0.9.1. Las secciones numeradas §1–§11 y los bloques v0.8.x de más abajo son **históricos**: donde digan «sin JavaScript», «sin DOM/CSS» o «descargas de un solo flujo» ya no es cierto. Lo vigente por versión está en `docs/V0.9.x.md`; el plan por fases en `PLAN_MAESTRO.md`.
+> Última actualización: 9 de noviembre de 2026, noche (resultados de v0.9.5 en PS4 + sonda Piglet; antes: **v0.9.5, tandas 1 y 2: sondeo SDL/GPU + opción `gpu` + Canvas 2D + modo juego**). Versiones v0.9.0–v0.9.5: **ninguna probada aún en PS4 salvo el log de v0.9.0/0.9.1 ya analizado**; v0.9.3 y v0.9.4 no se han compilado en el CI ni probado. El último log recibido es de v0.9.1. Las secciones numeradas §1–§11 y los bloques v0.8.x de más abajo son **históricos**: donde digan «sin JavaScript», «sin DOM/CSS» o «descargas de un solo flujo» ya no es cierto. Lo vigente por versión está en `docs/V0.9.x.md`; el plan por fases en `PLAN_MAESTRO.md`.
 
+# >>> RESULTADOS v0.9.5 EN PS4 (9-nov-2026, noche) + SONDA PIGLET <<<
+> El usuario instalo v0.9.5 (compila: el CI no cayo a `js_fallback`/`canvas_fallback`) y devolvio `log.txt` + zip `logs`.
+## Hechos medidos
+- Log: primera linea `== psbrowser v0.9.5 (DOM+CSS+JS+Canvas2D+GPU probe) ==`, `[jsx] motor JS: QuickJS | js=2`, 99 cookies cargadas. Sesion: DDG, archive.org (listados y un ZIP de 678 MB), nintendolife (verificacion).
+- `[gpu]`: 1 controlador de video ("PS4"), **1 controlador de render = `software`** (flags 0x9, textura max 0x0). `gpu=1` por SDL no puede ayudar.
+- Rendimiento UI: dibujo 26 ms (pagina interna) + subida/presentacion ~52 ms por fotograma a 1080p => ~12 fps al hacer scroll.
+- JS en archive.org: `NodeFilter is not defined` (webcomponents-bundle), `TypeError: not a function` (archive.min.js, 755 KB), `interrupted` (limite de CPU del temporizador). Pagina de ~945 KB: 6,7 s la 1.a vez, ~1 s la 2.a (cache).
+- Descargas: el ZIP de archive.org por trozos de 16 MB: pico 3,49 MB/s, media 2,31 MB/s (antes 0,65 MB/s por conexion).
+- `docs/canvas_test.html` (alojada en GitHub Pages por el usuario): **segun el usuario "todo salio ok"** (no se vio la lista literal ni los fps del modo juego). No hay lineas `[game]`/`[canvas]` en el log recibido (la prueba fue otra sesion/ no se envio ese log).
+## sdl_probe.txt (CI)
+- SDL 2.0.9. Libs: `libSceGnmDriver.so`, `libSceGnmDriverCompat.so`, `libScePigletv2VSH.so` (EGL/GLES del sistema), `libSceVideoOut*.so`, `libSceVdec*`. Include: `orbis/GnmDriver.h`, `orbis/VideoOut.h`, `SDL_opengles2*.h`. Samples: **`piglet`**, `graphics`, `SDL2`...
+- `libSDL2.a` contiene simbolos `SW_RenderDriver` y `PS4_RenderDriver/PS4_CreateRenderer`, pero en ejecucion SDL solo lista `software`. Las cadenas `gnm`/`vulkan` que aparecen son solo coincidencias de texto (sin interpretar).
+## Hipotesis (SIN verificar) y siguiente paso
+- Hay un camino real a la GPU: **Piglet = EGL + OpenGL ES 2** del sistema, con muestra oficial en el toolchain. Plan: renderer experimental `gpu=2` que cree contexto EGL, suba el lienzo 1920x1080 como textura GLES2 y dibuje un quad (y el video NV12/RGBA como textura), sustituyendo los ~52 ms de presentacion por software. Riesgos: modulo sprx del sistema, memoria de GPU, interaccion con SDL (que tambien abre VideoOut: probablemente haya que prescindir de SDL_Window en ese modo), cuelgues. Hay que reaprovechar la proteccion `gpu_try.txt`.
+- **Paso inmediato (hecho en el repo, sin compilar):** el workflow tiene una sonda nueva "Sonda de Piglet (GLES2) y GNM" (con `probe_sdl` marcado) que escribe `logs/piglet_probe.txt`: archivos y fuente del sample `piglet`, Makefile, cabeceras EGL/GLES, simbolos de `libScePigletv2VSH.so` y funciones de `GnmDriver.h`. **Pedir ese archivo al usuario antes de escribir una linea del renderer.**
+- Aunque funcione, WebGL/WASM siguen siendo irreales (QuickJS sin JIT); la GPU acelera presentacion, escalado de video y canvas 2D, no el JavaScript.
+## Git (solo cambia el workflow)
+```bash
+cd Sackso_PS4_Browser_Testing-main
+git add .github/workflows/build-pkg.yml docs/CONTEXTO.md
+git commit -m "CI: sonda de Piglet/GNM; contexto con resultados de v0.9.5"
+git push
+```
+Despues: Actions -> Build PKG -> Run workflow con `probe_sdl` marcado -> descargar `logs` y enviar `piglet_probe.txt`.
+---
 # >>> v0.9.5 (SONDEO SDL/GPU + CANVAS 2D + MODO JUEGO) - SIN PROBAR EN PS4 - leer primero <<<
 > 9-nov-2026. Detalle en `docs/V0.9.5.md`. El usuario decidió **no probar v0.9.4 y saltar a v0.9.5** para testear a fondo (se le avisó de que apilar versiones sin probar dificulta el diagnóstico; el CI puede fallar por varias versiones a la vez: pedir `build.log`). Objetivo declarado: aprovechar al máximo la potencia general y de render, y más compatibilidad (más webs, juegos y utilidades web, ports a navegador).
 ## Qué hay (primera tanda)
