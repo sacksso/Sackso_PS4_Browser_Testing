@@ -48,7 +48,9 @@ sh tools/tests/run_scanvideos.sh
 ```
 # VSync (app/vsync.h): reproductores simulados (consumo, reloj propio, vuelta rapida, seek, parada de red); ASan/UBSan
 g++ -std=c++17 -Wall -Wextra -fsanitize=address,undefined -Iapp tools/tests/test_vsync.cpp -o /tmp/test_vsync && /tmp/test_vsync
-# vplayer.cpp: solo sintaxis, con stubs de orbis/AudioOut.h, UserService.h, Sysmodule.h y libkernel.h (no estan en tools/stubs: crearlos en /tmp)
+g++ -std=c++17 -O2 -Wall -Wextra -Iapp tools/tests/test_vconv.cpp -o /tmp/test_vconv && /tmp/test_vconv   # v0.9.7: conversion NV12 SSE2 y reduccion 2:1 (tambien con -DPSB_NO_SIMD)
+# vplayer.cpp: solo sintaxis (desde v0.9.7 los stubs orbis/AudioOut.h, UserService.h, Sysmodule.h y libkernel.h ya estan en tools/stubs)
+g++ -std=c++17 -fsyntax-only -Itools/stubs -Iapp app/vplayer.cpp
 ```
 `run_scanvideos.sh` ahora extrae desde `// Clasifica una URL de video` (incluye `vidScore`).
 

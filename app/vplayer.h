@@ -28,8 +28,14 @@ struct VpInfo {
     bool netWait = false;             // esperando datos de la red
     int noFrameSecs = 0;              // segundos reproduciendo sin recibir ningun fotograma (sospecha de decodificador roto)
     int vdec = 0;
+    int srcFps = 0;                   // v0.9.7: fps declarados por el propio video (0 = desconocido)
+    bool decim = false;               // v0.9.7: se esta convirtiendo a la mitad de resolucion (video grande mostrado en pequeno)
+    unsigned long catchDropped = 0;   // v0.9.7: fotogramas atrasados saltados con audio
 };
 
+// v0.9.7: alto (px) con el que se mostrara el video en pantalla (0 = no reducir). Si el video es mucho mas alto (> 1,4x), el reproductor lo
+// convierte directamente a la mitad en cada eje (mas fps). Llamar antes de cada vp_update (es barato).
+void vp_set_convert_target(int dstH);
 // Tipo de decodificador de video: 0 = el del sistema (hardware), 2 = software, 3 = software2 (PostInit de AvPlayer). Antes de vp_open.
 void vp_set_decoder(int type);
 void vp_set_volume_default(int pct);

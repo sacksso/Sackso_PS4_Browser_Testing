@@ -19,6 +19,7 @@
 #include "canvas.h"
 #include "log.h"
 #include "vsource.h"
+#include "vconv.h"
 #include "vsync.h"
 
 static uint32_t SDL_GetTicksCompat() { return static_cast<uint32_t>(sceKernelGetProcessTime() / 1000); }  // ms desde el inicio del proceso
@@ -157,7 +158,10 @@ struct Player {
     // sincronizacion por reloj de pared (solo video sin audio, ver vsync.h) y fotograma retenido
     VSync sync;
     std::vector<uint32_t> pend;
-    int pendW = 0, pendH = 0;
+    int pendW = 0, pendH = 0, pendVW = 0, pendVH = 0;  // pendVW/H: tamano real del video del fotograma retenido (pendW/H puede ser la mitad)
+    int srcFps = 0;                    // fps declarados por el video (0 = desconocido)
+    bool decim = false;                // el ultimo fotograma se convirtio a mitad de resolucion (v0.9.7)
+    unsigned long catchDropped = 0;    // fotogramas atrasados saltados con audio (v0.9.7)
     uint64_t pendTs = 0, fpsTs0 = 0, convUsAcc = 0;
     unsigned long dropped = 0, convN = 0;
     int inactiveCount = 0;
@@ -165,6 +169,7 @@ struct Player {
 };
 Player P;
 int g_vdec = 0;
+int g_convTargetH = 0;   // alto en pantalla del video (0 = no reducir): ver vp_set_convert_target
 int g_volDefault = 80;
 
 void setStage(const std::string& s) {
@@ -414,36 +419,9 @@ void openMain(std::string source, std::string referer) {
     psb_log("[vp] reproduciendo (video=%d audio=%d)", P.haveVideo.load() ? 1 : 0, P.haveAudio.load() ? 1 : 0);
 }
 
-// ---------------------------------------------------------------- NV12 -> ARGB
-uint8_t g_clip[1024];
-bool g_clipInit = false;
-void initClip() {
-    if (g_clipInit) return;
-    for (int i = 0; i < 1024; i++) g_clip[i] = static_cast<uint8_t>(std::max(0, std::min(255, i - 256)));
-    g_clipInit = true;
-}
-void nv12ToArgb(const uint8_t* y, int ys, const uint8_t* uv, int uvs, int w, int h, uint32_t* out, bool hd) {
-    initClip();
-    const int rv = hd ? 459 : 409, gu = hd ? 55 : 100, gv = hd ? 136 : 208, bu = hd ? 541 : 516;  // BT.709 (HD) / BT.601 (SD), rango limitado
-    for (int j = 0; j < h; j += 2) {
-        const uint8_t* y0 = y + static_cast<size_t>(j) * ys;
-        const uint8_t* y1 = (j + 1 < h) ? y0 + ys : y0;
-        const uint8_t* c = uv + static_cast<size_t>(j / 2) * uvs;
-        uint32_t* o0 = out + static_cast<size_t>(j) * w;
-        uint32_t* o1 = (j + 1 < h) ? o0 + w : o0;
-        for (int i = 0; i < w; i += 2) {
-            const int u = c[i] - 128, v = c[i + 1] - 128;
-            const int r = rv * v, g = gu * u + gv * v, b = bu * u;
-            const int a0 = 298 * (y0[i] - 16), a1 = 298 * (y0[i + 1 < w ? i + 1 : i] - 16);
-            const int b0 = 298 * (y1[i] - 16), b1 = 298 * (y1[i + 1 < w ? i + 1 : i] - 16);
-            o0[i] = 0xFF000000u | (g_clip[((a0 + r) >> 8) + 256] << 16) | (g_clip[((a0 - g) >> 8) + 256] << 8) | g_clip[((a0 + b) >> 8) + 256];
-            if (i + 1 < w) o0[i + 1] = 0xFF000000u | (g_clip[((a1 + r) >> 8) + 256] << 16) | (g_clip[((a1 - g) >> 8) + 256] << 8) | g_clip[((a1 + b) >> 8) + 256];
-            if (j + 1 < h) {
-                o1[i] = 0xFF000000u | (g_clip[((b0 + r) >> 8) + 256] << 16) | (g_clip[((b0 - g) >> 8) + 256] << 8) | g_clip[((b0 + b) >> 8) + 256];
-                if (i + 1 < w) o1[i + 1] = 0xFF000000u | (g_clip[((b1 + r) >> 8) + 256] << 16) | (g_clip[((b1 - g) >> 8) + 256] << 8) | g_clip[((b1 + b) >> 8) + 256];
-            }
-        }
-    }
+// ---------------------------------------------------------------- NV12 -> ARGB (v0.9.7: kernels SSE2 y reduccion 2:1 en vconv.h)
+inline void nv12ToArgb(const uint8_t* y, int ys, const uint8_t* uv, int uvs, int w, int h, uint32_t* out, bool hd) {
+    vconv::nv12ToArgb(y, ys, uv, uvs, w, h, out, hd);
 }
 
 void dumpFirstFrame(const AvFrameInfoEx& fi, int w, int h, int pitch) {
@@ -474,6 +452,7 @@ void dumpFirstFrame(const AvFrameInfoEx& fi, int w, int h, int pitch) {
 // ======================================================================================================================
 // API publica
 // ======================================================================================================================
+void vp_set_convert_target(int dstH) { g_convTargetH = dstH > 0 ? dstH : 0; }
 void vp_set_decoder(int type) { g_vdec = (type == 2 || type == 3) ? type : 0; }
 void vp_set_volume_default(int pct) { g_volDefault = std::max(0, std::min(100, pct)); }
 
@@ -491,7 +470,7 @@ bool vp_open(const std::string& source, const std::string& title, const std::str
     P.posMs = 0; P.vw = P.vh = 0;
     P.frames = 0; P.fps = 0; P.fpsN = 0; P.fpsT0 = 0; P.inactiveCount = 0; P.dumped = false; P.lastFrameTick = 0;
     P.argbW = P.argbH = 0;
-    P.sync.reset(); P.pend.clear(); P.pendW = P.pendH = 0; P.pendTs = 0; P.fpsTs0 = 0; P.convUsAcc = 0; P.convN = 0; P.dropped = 0; P.speed = 0; P.convMs = 0;
+    P.sync.reset(); P.pend.clear(); P.pendW = P.pendH = P.pendVW = P.pendVH = 0; P.srcFps = 0; P.decim = false; P.catchDropped = 0; P.pendTs = 0; P.fpsTs0 = 0; P.convUsAcc = 0; P.convN = 0; P.dropped = 0; P.speed = 0; P.convMs = 0;
     P.volume = g_volDefault;
     P.av = nullptr; P.audio = -1; P.src = nullptr;
     P.state = VP_OPENING;
@@ -551,6 +530,7 @@ VpInfo vp_info() {
     if (r.state == VP_PLAYING && P.buffering) r.state = VP_BUFFERING;
     if (r.state == VP_PLAYING && P.userPaused) r.state = VP_PAUSED;
     r.vdec = g_vdec;
+    r.srcFps = P.srcFps; r.decim = P.decim; r.catchDropped = P.catchDropped;
     if ((r.state == VP_PLAYING || r.state == VP_BUFFERING) && r.hasVideo && P.frames == 0 && P.startTick)
         r.noFrameSecs = static_cast<int>((SDL_GetTicksCompat() - P.startTick) / 1000);
     return r;
@@ -596,8 +576,8 @@ static bool vpCountFrame(uint32_t now, uint64_t ts) {
         P.speed = static_cast<float>(contMs) / static_cast<float>(wallMs);
         P.convMs = P.convN ? static_cast<float>(P.convUsAcc) / 1000.0f / static_cast<float>(P.convN) : 0.0f;
         if (P.frames < 400 || (P.frames % 300) == 0)
-            psb_log("[vp] %.1f fps mostrados | velocidad %.2fx (%llu ms de contenido en %u ms de pared) | descartados %lu | conversion %.1f ms | total %lu pos=%llu ms | reloj=%s",
-                    P.fps, P.speed, static_cast<unsigned long long>(contMs), wallMs, P.dropped, P.convMs, P.frames, static_cast<unsigned long long>(P.posMs.load()),
+            psb_log("[vp] %.1f fps mostrados | velocidad %.2fx (%llu ms de contenido en %u ms de pared) | descartados %lu | conversion %.1f ms%s | total %lu pos=%llu ms | reloj=%s",
+                    P.fps, P.speed, static_cast<unsigned long long>(contMs), wallMs, P.dropped, P.convMs, P.decim ? " (mitad 2:1)" : "", P.frames, static_cast<unsigned long long>(P.posMs.load()),
                     P.haveAudio ? "audio" : "pared");
         P.fpsT0 = now; P.fpsTs0 = ts; P.fpsN = 0; P.convUsAcc = 0; P.convN = 0;
     }
@@ -632,7 +612,7 @@ bool vp_update() {
         std::swap(P.argbW, P.pendW);
         std::swap(P.argbH, P.pendH);
         ts = P.pendTs;
-        P.vw = P.argbW; P.vh = P.argbH;
+        P.vw = P.pendVW > 0 ? P.pendVW : P.argbW; P.vh = P.pendVH > 0 ? P.pendVH : P.argbH;
         return vpCountFrame(now, ts);
     }
     auto pull = [&](uint64_t& t) {
@@ -647,8 +627,21 @@ bool vp_update() {
         const VSync::Result r = P.sync.pump(now, pull);
         if (!r.have) return false;
         ts = r.ts; dropped = r.dropped; hold = r.hold;
-    } else if (!pull(ts)) {
-        return false;
+    } else {
+        if (!pull(ts)) return false;
+        // v0.9.7: con audio, si el fotograma recibido va claramente por detras de la posicion del reproductor se salta (sin convertirlo) y se
+        // pide el siguiente, hasta 3 veces por vuelta. Asi, si la consola va lenta, el video no se queda atras del sonido y no se gasta
+        // tiempo en convertir fotogramas que nadie vera. Si la posicion no es comparable con la marca del fotograma, la diferencia sale
+        // ~0 (o enorme) y no se salta nada: se limita a 150 ms .. 4 s de retraso.
+        for (int k = 0; k < 3; k++) {
+            const int64_t lag = static_cast<int64_t>(P.posMs.load()) - static_cast<int64_t>(ts);
+            if (lag < 150 || lag > 4000) break;
+            uint64_t t2 = 0;
+            if (!pull(t2)) break;  // no hay otro: se muestra este, aunque llegue tarde
+            ts = t2;
+            dropped++;
+            P.catchDropped++;
+        }
     }
     const AvVideoEx& v = fi.details.video;
     int w = static_cast<int>(v.width), h = static_cast<int>(v.height);
@@ -660,17 +653,24 @@ bool vp_update() {
     }
     const int pitch = v.pitch >= v.width ? static_cast<int>(v.pitch) : w;
     if (!P.dumped) { P.dumped = true; dumpFirstFrame(fi, w, h, pitch); }
+    if (v.framerate >= 1 && v.framerate <= 240) P.srcFps = static_cast<int>(v.framerate);
+    // v0.9.7: si el video se va a mostrar bastante mas pequeno que su tamano (p. ej. 1080p a 720p/540p), se convierte directamente a
+    // la mitad en cada eje: 4 veces menos pixeles que convertir, subir como textura y mover. Lo fija el llamador con vp_set_convert_target.
+    const bool half = g_convTargetH > 0 && h * 10 > g_convTargetH * 14 && w >= 64 && h >= 64;  // alto > 1,4 x alto en pantalla
+    const int cw = half ? w / 2 : w, ch = half ? h / 2 : h;
     std::vector<uint32_t>& dst = hold ? P.pend : P.argb;
     int& dw = hold ? P.pendW : P.argbW;
     int& dh = hold ? P.pendH : P.argbH;
-    if (static_cast<int>(dst.size()) < w * h || dw != w || dh != h) { dst.assign(static_cast<size_t>(w) * h, 0xFF000000u); dw = w; dh = h; }
+    if (static_cast<int>(dst.size()) < cw * ch || dw != cw || dh != ch) { dst.assign(static_cast<size_t>(cw) * ch, 0xFF000000u); dw = cw; dh = ch; }
     const uint8_t* y = static_cast<const uint8_t*>(fi.data);
     const uint64_t c0 = sceKernelGetProcessTime();
-    nv12ToArgb(y, pitch, y + static_cast<size_t>(pitch) * h, pitch, w, h, dst.data(), h >= 720);
+    if (half) vconv::nv12ToArgbHalf(y, pitch, y + static_cast<size_t>(pitch) * h, pitch, w, h, dst.data(), h >= 720);
+    else nv12ToArgb(y, pitch, y + static_cast<size_t>(pitch) * h, pitch, w, h, dst.data(), h >= 720);
     P.convUsAcc += sceKernelGetProcessTime() - c0;
     P.convN++;
+    P.decim = half;
     P.dropped += static_cast<unsigned long>(dropped);
-    if (hold) { P.pendTs = ts; return false; }  // va adelantado: se muestra cuando le toque (pendingDue)
+    if (hold) { P.pendTs = ts; P.pendVW = w; P.pendVH = h; return false; }  // va adelantado: se muestra cuando le toque (pendingDue)
     P.vw = w; P.vh = h;
     return vpCountFrame(now, ts);
 }

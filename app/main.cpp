@@ -110,6 +110,9 @@ struct Config {
     bool contrast = false;    // v0.9.3: tema de alto contraste (negro, texto blanco, enlaces amarillos)
     int curscale = 100;       // v0.9.3: tamano del cursor del raton en % (100, 150, 200)
     int cfgv = 0;             // v0.9.3: version del archivo de configuracion (para migrar valores por defecto una sola vez)
+    bool vconv = true;        // v0.9.7: convertir a mitad de resolucion los videos mucho mas grandes que su tamano en pantalla (mas fps)
+    bool padlog = false;      // v0.9.7: escribir cada boton/cruceta del mando en el log (solo para diagnostico del mapeo)
+    bool hints = true;        // v0.9.7: mostrar unos segundos la ayuda de botones abajo al usar el mando
 };
 static Config g_cfg;
 // v0.9.5: estado del renderer (ver createRenderer(), mas abajo)
@@ -117,6 +120,11 @@ static bool g_gpuActive = false;                 // true = se esta usando un ren
 static bool g_gpuTrial = false;                  // true = sesion de prueba con GPU (se confirma a los 30 s)
 static std::vector<std::string> g_gpuReport;     // lo que ofrece SDL en este sistema (about:bench y [gpu] en el log)
 static const char* kGpuTryPath = "/data/psbrowser/gpu_try.txt";
+static const char* kRunPath = "/data/psbrowser/running.txt";   // v0.9.7: cuenta arranques que terminaron antes de 45 s (modo seguro)
+static bool g_safeMode = false;                                 // v0.9.7: esta sesion arranco en modo seguro
+static bool g_runMarker = false;                                // el marcador running.txt esta puesto (se quita a los 45 s o al salir)
+static uint32_t g_hintUntil = 0;                                // v0.9.7: hasta cuando se muestra la ayuda de botones
+static const char* kVersion = "v0.9.7";
 static std::vector<std::pair<std::string, std::string>> g_bookmarks;  // (url, titulo)
 static const char* kCfgPath = "/data/psbrowser/config.txt";
 static const char* kBmPath = "/data/psbrowser/bookmarks.txt";
@@ -150,7 +158,7 @@ static void configSave() {
     fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\nvscale=%d\nvpart=%d\nsearch=%d\nua=%d\nuipart=%d\ngpu=%d\ngscale=%d\njs=%d\ndlconn=%d\ncookies=%d\nadblock=%d\nsolver=%s\n",
             g_cfg.mouseSens, g_cfg.mouseAccel ? 1 : 0, g_cfg.wheelInvert ? 1 : 0, g_cfg.wheelStep, g_cfg.home.c_str(), g_cfg.dark ? 1 : 0,
             g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume, g_cfg.vscale, g_cfg.vpart ? 1 : 0, g_cfg.search, g_cfg.ua, g_cfg.uipart ? 1 : 0, g_cfg.gpu, g_cfg.gscale, g_cfg.js, g_cfg.dlconn, g_cfg.cookies ? 1 : 0, g_cfg.adblock ? 1 : 0, g_cfg.solver.c_str());
-    fprintf(f, "contrast=%d\ncurscale=%d\ncfgv=%d\n", g_cfg.contrast ? 1 : 0, g_cfg.curscale, 2);
+    fprintf(f, "contrast=%d\ncurscale=%d\ncfgv=%d\nvconv=%d\npadlog=%d\nhints=%d\n", g_cfg.contrast ? 1 : 0, g_cfg.curscale, 2, g_cfg.vconv ? 1 : 0, g_cfg.padlog ? 1 : 0, g_cfg.hints ? 1 : 0);
     fclose(f);
 }
 static void configLoad() {
@@ -191,6 +199,9 @@ static void configLoad() {
         else if (k == "contrast") g_cfg.contrast = v == "1";
         else if (k == "curscale") g_cfg.curscale = atoi(v.c_str());
         else if (k == "cfgv") g_cfg.cfgv = atoi(v.c_str());
+        else if (k == "vconv") g_cfg.vconv = v == "1";
+        else if (k == "padlog") g_cfg.padlog = v == "1";
+        else if (k == "hints") g_cfg.hints = v == "1";
     }
     fclose(f);
     if (g_cfg.cfgv < 2) { g_cfg.vscale = 3; g_cfg.cfgv = 2; psb_log("[cfg] migracion v0.9.3: vscale=3 (1280x720, mas fps en video)"); }
@@ -552,8 +563,14 @@ static std::string genSettings() {
         "<h2>Renderizado (experimental)</h2><p>GPU: <a href=\"psb:gpu\">[ " + std::string(g_cfg.gpu ? "intentar renderer acelerado" : "solo software") + " ]</a> (activo ahora: " + (g_gpuActive ? "ACELERADO" : "software") + "; el cambio se aplica al reiniciar el navegador. Si tras activarlo la pantalla sale negra o se cierra, cierra la app: vuelve sola a software). <a href=\"about:bench\">[ ver lo que ofrece SDL ]</a></p>"
         "<p>Modo juego (F2, para paginas con canvas): tamano: <a href=\"psb:gscale\">[ " + std::string(g_cfg.gscale == 0 ? "ajustar a la pantalla (lento)" : (g_cfg.gscale == 2 ? "x2 si cabe" : "1:1 centrado (rapido)")) + " ]</a></p>"
         "<p><a href=\"about:shortcuts\">[ Atajos de teclado (F1) ]</a> <a href=\"about:history\">[ Historial (Ctrl+H) ]</a></p>";
+    const std::string extra2 =
+        "<h2>Video y mando (v0.9.7)</h2>"
+        "<p>Reducir a la mitad los videos grandes cuando se ven a 720p/540p (mas fps): <a href=\"psb:vconv\">[ " + std::string(g_cfg.vconv ? "si" : "no") + " ]</a></p>"
+        "<p>Ayuda de botones del mando (unos segundos abajo): <a href=\"psb:hints\">[ " + std::string(g_cfg.hints ? "si" : "no") + " ]</a></p>"
+        "<p>Registrar cada boton del mando en el log (solo diagnostico): <a href=\"psb:padlog\">[ " + std::string(g_cfg.padlog ? "si" : "no") + " ]</a></p>"
+        "<p><a href=\"about:diag\">[ Diagnostico: version, motor, video, red y ultimas lineas del log ]</a></p>";
     const size_t e = out.rfind("</body>");
-    out.insert(e == std::string::npos ? out.size() : e, extra);
+    out.insert(e == std::string::npos ? out.size() : e, extra + extra2);
     return out;
 }
 static std::string genBookmarks() {
@@ -739,6 +756,56 @@ static std::string genBench() {
     h += "<p>Devuelve /data/psbrowser/log.txt (lineas [bench]) para decidir la mejora. <a href=\"about:settings\">Configuracion</a></p></body></html>";
     return h;
 }
+static const char* vscaleLabelDiag(int v) { return v == 1 ? "1:1" : (v == 2 ? "x2" : (v == 3 ? "720p" : (v == 4 ? "540p" : "pantalla"))); }
+// v0.9.7: ultimas lineas del log (about:diag). Lee solo el final del archivo.
+static std::vector<std::string> readLogTail(size_t maxBytes, size_t maxLines) {
+    std::vector<std::string> out;
+    FILE* f = fopen("/data/psbrowser/log.txt", "rb");
+    if (!f) return out;
+    fseek(f, 0, SEEK_END);
+    const long sz = ftell(f);
+    const long from = sz > static_cast<long>(maxBytes) ? sz - static_cast<long>(maxBytes) : 0;
+    fseek(f, from, SEEK_SET);
+    std::string buf(static_cast<size_t>(sz - from), '\0');
+    const size_t n = fread(&buf[0], 1, buf.size(), f);
+    buf.resize(n);
+    fclose(f);
+    size_t pos = 0;
+    while (pos < buf.size()) {
+        size_t nl = buf.find('\n', pos);
+        if (nl == std::string::npos) nl = buf.size();
+        std::string l = buf.substr(pos, nl - pos);
+        while (!l.empty() && l.back() == '\r') l.pop_back();
+        if (!l.empty()) out.push_back(l.size() > 220 ? l.substr(0, 220) + "..." : l);
+        pos = nl + 1;
+    }
+    if (from > 0 && !out.empty()) out.erase(out.begin());  // la primera linea puede estar cortada
+    if (out.size() > maxLines) out.erase(out.begin(), out.end() - static_cast<long>(maxLines));
+    return out;
+}
+static std::string genDiag() {
+    std::string h = std::string("<html><head><title>Diagnostico</title></head><body><h1>Diagnostico</h1>");
+    h += "<h2>Programa</h2><ul>";
+    h += std::string("<li>Version: psbrowser ") + kVersion + " | JavaScript: " + (jsx_has_engine() ? "QuickJS" : "no incluido en este PKG") + " (js=" + std::to_string(g_cfg.js) + ")</li>";
+    h += std::string("<li>Modo seguro: ") + (g_safeMode ? "SI (esta sesion arranco sin GPU, sin actualizacion parcial y con el decodificador del sistema: se detectaron dos cierres seguidos antes de 45 s)" : "no") + "</li>";
+    h += std::string("<li>Pantalla: renderer ") + (g_gpuActive ? "acelerado" : "por software") + " (gpu=" + std::to_string(g_cfg.gpu) + ") | actualizacion parcial interfaz=" + (g_cfg.uipart ? "si" : "no") + "</li>";
+    h += std::string("<li>Raton: ") + (g_mouseOk ? "iniciado" : "no iniciado o sin dispositivo") + " | cookies guardadas: " + std::to_string(cookies_count()) + " | descargas registradas: " + std::to_string(g_dls.size()) + "</li>";
+    h += "</ul><h2>Video</h2><ul>";
+    h += std::string("<li>Ajustes: decodificador=") + std::to_string(g_cfg.vdec) + " | tamano=" + vscaleLabelDiag(g_cfg.vscale) + " | media resolucion al dibujar=" + (g_cfg.vhalf ? "si" : "no") + " | reducir 2:1 videos grandes=" + (g_cfg.vconv ? "si" : "no") + " | actualizacion parcial=" + (g_cfg.vpart ? "si" : "no") + "</li>";
+    const VpInfo vi = vp_info();
+    if (vi.state == VP_CLOSED) h += "<li>Ahora mismo no hay ningun video abierto (los detalles del ultimo se ven en las lineas [vp] del log).</li>";
+    else {
+        char b[400];
+        snprintf(b, sizeof(b), "%dx%d | %.1f fps mostrados (el video declara %d) | velocidad %.2fx | conversion %.1f ms%s | descartados %lu (con audio: %lu)", vi.vw, vi.vh, vi.fps, vi.srcFps, vi.speed, vi.convMs, vi.decim ? " (a mitad de resolucion)" : "", vi.dropped, vi.catchDropped);
+        h += std::string("<li>Video abierto: ") + htmlEscape(b) + "</li>";
+    }
+    h += "</ul><h2>Ultimas lineas del log</h2><ul>";
+    const std::vector<std::string> tail = readLogTail(12000, 40);
+    if (tail.empty()) h += "<li>(no se pudo leer /data/psbrowser/log.txt)</li>";
+    for (const std::string& l : tail) h += "<li>" + htmlEscape(l) + "</li>";
+    h += "</ul><p>El log completo esta en /data/psbrowser/log.txt. <a href=\"about:settings\">Configuracion</a> | <a href=\"about:home\">Inicio</a></p></body></html>";
+    return h;
+}
 static std::string g_rawHtml;  // HTML original de la pagina que se esta cargando (antes de DOM/JS); los videos se buscan ahi (los scripts no se conservan)
 // ------------------------------------------------------------------ verificaciones / captchas (v0.9.1)
 // El navegador no ejecuta los captchas ni la comprobacion de Cloudflare. Se resuelven en el PC (a mano, con tu navegador) y el
@@ -812,6 +879,7 @@ static std::string genInternal(const std::string& url) {
     if (url == "about:shortcuts") return genShortcuts();
     if (url == "about:history") return genHistory();
     if (url == "about:bench") return genBench();
+    if (url == "about:diag") return genDiag();
     if (url == "about:dlbench") return genDlBench();
     if (url == "about:videos") return genVideos();
     if (url == "about:settings") return genSettings();
@@ -1975,6 +2043,9 @@ static bool handleAction(Browser& b, const std::string& a) {
     else if (a == "contrast") { g_cfg.contrast = !g_cfg.contrast; g_th = pickTheme(); }
     else if (a == "curscale") { g_cfg.curscale = g_cfg.curscale == 100 ? 150 : (g_cfg.curscale == 150 ? 200 : 100); g_uiForceFull = true; }
     else if (a == "vhalf") g_cfg.vhalf = !g_cfg.vhalf;
+    else if (a == "vconv") g_cfg.vconv = !g_cfg.vconv;
+    else if (a == "hints") g_cfg.hints = !g_cfg.hints;
+    else if (a == "padlog") g_cfg.padlog = !g_cfg.padlog;
     else if (a == "search") g_cfg.search = (g_cfg.search + 1) % 5;
     else if (a == "ua") g_cfg.ua = (g_cfg.ua + 1) % 5;
     else if (a == "clearhist") { g_history.clear(); historySave(); toast("Historial borrado"); }
@@ -2899,6 +2970,7 @@ static void quitClick() {
 // Salida: cierra el video y termina el proceso con _exit (evita destructores estaticos con hilos vivos). Un hilo vigilante fuerza la salida
 // si algo se atasca al cerrar (p. ej. el reproductor).
 static void hardExit() {
+    if (g_runMarker) { g_runMarker = false; remove(kRunPath); }  // salida normal: no cuenta como cierre inesperado
     cookies_save();
     psb_log("[quit] saliendo");
     std::thread([] { SDL_Delay(2500); psb_log("[quit] salida forzada por el vigilante"); _exit(0); }).detach();
@@ -2906,6 +2978,19 @@ static void hardExit() {
     imgw_pause(true);
     psb_log("[quit] adios");
     _exit(0);
+}
+// v0.9.7: ayuda de botones del mando. Aparece unos segundos tras usar el mando (si no esta desactivada) y no mueve el contenido.
+static void drawHintBar(Canvas& cv) {
+    if (!g_cfg.hints || g_hintUntil == 0 || SDL_GetTicks() >= g_hintUntil || g_vpMode) return;
+    std::string t;
+    if (g_quitAsk) t = "X salir   O cancelar";
+    else if (g_ctx.open) t = "Cruceta mover   X elegir   O cerrar";
+    else if (g_osk.open) t = "Cruceta mover   X escribir   O borrar   Cuadrado espacio   Triangulo mayusculas   L1/R1 cursor   Options enviar";
+    else t = "X abrir   O atras   Cuadrado recargar   Triangulo inicio   L1/R1 pagina   Cruceta: arriba/abajo enlace, izq/der atras/adelante   Stick desplazar   Boton 11 menu";
+    const Theme& th = g_th;
+    const int bh = 40;
+    cv.rect(0, H - bh, W, bh, th.statusBg);
+    te_draw(cv, 20, baseFor(H - bh, bh, FONT_SANS, 20), te_fit(t, W - 40, FONT_SANS, 20, false), FONT_SANS, 20, false, th.statusText);
 }
 static void drawFrame() {
     Canvas& cv = *g_cv;
@@ -2941,6 +3026,7 @@ static void drawFrame() {
     drawCtx(cv);
     if (g_dlp.active) drawDownload(cv);
     if (g_osk.open) osk_draw(g_osk, cv, th, W, H, g_caret);
+    drawHintBar(cv);
     if (g_quitAsk) drawQuit(cv);
 }
 static void renderFrame() {
@@ -3737,7 +3823,7 @@ static SDL_Renderer* createRenderer(SDL_Window* win) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser v0.9.6 (DOM+CSS+JS+Canvas2D+GPU probe) ==");
+    psb_log("== psbrowser %s (DOM+CSS+JS+Canvas2D+GPU probe+VCONV) ==", kVersion);
     psb_log("[jsx] motor JS: %s | js=%d uipart=%d", jsx_has_engine() ? "QuickJS" : "no incluido", g_cfg.js, g_cfg.uipart ? 1 : 0);
     configLoad();
     cookies_load();
@@ -3746,6 +3832,17 @@ int main(int, char**) {
     bookmarksLoad();
     historyLoad();
     clampCfg();  // aplica el buscador y el User-Agent guardados
+    {   // v0.9.7: modo seguro. running.txt cuenta los arranques cuya sesion duro menos de 45 s (se borra a los 45 s o al salir con normalidad).
+        int n = 0;
+        if (FILE* f = fopen(kRunPath, "r")) { char bf[16] = {0}; if (fgets(bf, sizeof(bf), f)) n = atoi(bf); fclose(f); }
+        if (n >= 2) {
+            g_safeMode = true;
+            g_cfg.gpu = 0; g_cfg.vpart = false; g_cfg.vdec = 0;
+            psb_log("[safe] MODO SEGURO: %d arranques seguidos terminaron antes de 45 s; esta sesion usa gpu=0, vpart=0, vdec=0", n);
+            n = 2;
+        } else n++;
+        if (FILE* f = fopen(kRunPath, "w")) { fprintf(f, "%d\n", n); fclose(f); g_runMarker = true; }
+    }
     dlListLoad();
     g_th = pickTheme();
     if (!te_init()) { psb_log("te_init FALLO (fuentes)"); return 1; }
@@ -3799,7 +3896,8 @@ int main(int, char**) {
             switch (e.type) {
                 case SDL_QUIT: running = false; break;
                 case SDL_JOYBUTTONDOWN:
-                    psb_log("boton %d", e.jbutton.button);
+                    if (g_cfg.padlog) psb_log("boton %d", e.jbutton.button);
+                    if (g_cfg.hints && !g_vpMode) { g_hintUntil = now + 4500; g_dirty = true; }
                     if (g_quitAsk) {  // X = salir, O = cancelar
                         if (e.jbutton.button == 0) g_quit = true;
                         else if (e.jbutton.button == 1) { g_quitAsk = false; g_dirty = true; }
@@ -3844,7 +3942,8 @@ int main(int, char**) {
                     }
                     break;
                 case SDL_JOYHATMOTION:
-                    psb_log("hat %d", e.jhat.value);
+                    if (g_cfg.padlog) psb_log("hat %d", e.jhat.value);
+                    if (g_cfg.hints && !g_vpMode && e.jhat.value != 0) { g_hintUntil = now + 4500; g_dirty = true; }
                     if (g_quitAsk) break;
                     if (g_vpMode) { videoHat(e.jhat.value); break; }
                     if (g_ctx.open) {
@@ -3989,6 +4088,8 @@ int main(int, char**) {
             if (B.urlEdit || B.editField >= 0 || g_osk.open) g_dirty = true;
         }
         if (g_toastUntil && now > g_toastUntil) { g_toastUntil = 0; g_toast.clear(); g_dirty = true; }
+        if (g_hintUntil && now > g_hintUntil) { g_hintUntil = 0; g_dirty = true; }
+        if (g_runMarker && now > 45000) { g_runMarker = false; remove(kRunPath); psb_log("[safe] sesion estable (45 s): marcador de arranque retirado"); }
         if (now - lastPump > 120) { lastPump = now; if (!g_vpMode) pumpImages(); }
         if (!g_vpMode && jsx_active(&B) && !B.urlEdit && B.editField < 0 && !g_osk.open) {  // temporizadores, rAF y promesas de la pagina
             std::string nh;
@@ -3997,8 +4098,22 @@ int main(int, char**) {
         if (g_vpMode) {  // fotogramas nuevos, cambios de estado y reloj del overlay
             if (!vp_active()) { g_vpMode = false; vidTexFree(); imgw_pause(false); g_dirty = true; }
             else {
+                {   // v0.9.7: alto con el que se vera el video (decide si se convierte a mitad de resolucion)
+                    const int convH = !g_cfg.vconv ? 0 : (g_cfg.vscale == 3 ? 720 : (g_cfg.vscale == 4 ? 540 : (g_cfg.vscale == 0 ? H : 0)));
+                    vp_set_convert_target(convH);
+                }
                 if (vp_update()) g_dirty = true;
                 const VpInfo vi = vp_info();
+                {   // v0.9.7: si va mucho mas lento de lo que declara el video, sugerir un tamano menor (una vez por video)
+                    static bool suggested = false;
+                    if (vi.frames < 10) suggested = false;
+                    else if (!suggested && vi.state == VP_PLAYING && !vi.netWait && vi.frames > 60 && vi.srcFps >= 10 && vi.fps > 0 && vi.fps < vi.srcFps * 0.75f && g_cfg.vscale != 4) {
+                        suggested = true;
+                        char m[200];
+                        snprintf(m, sizeof(m), "Pocos fotogramas (%.0f de %d fps). Prueba Cuadrado o la tecla S para bajar el tamano de imagen (540p da mas fps)", vi.fps, vi.srcFps);
+                        toast(m);
+                    }
+                }
                 static VpState lastSt = VP_CLOSED;
                 static bool lastOv = false;
                 static uint32_t lastClk = 0;
@@ -4045,7 +4160,7 @@ int main(int, char**) {
         } else if (moved) {
             renderFrame();
         }
-        SDL_Delay(4);
+        SDL_Delay(g_vpMode ? 1 : 4);  // v0.9.7: en video se consulta antes si hay fotograma nuevo
     }
     hardExit();  // no vuelve: _exit(0)
     return 0;

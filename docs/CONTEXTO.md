@@ -471,3 +471,6 @@ Pendiente principal: soporte de `type=module` en QuickJS; verificar en PS4 mocha
 
 ## 13. v0.9.4 (ver docs/V0.9.4.md)
 Sin probar en PS4. Prelude con stubs de WebSocket/EventSource/indexedDB/Intl/FileReader/BroadcastChannel/postMessage/XMLSerializer/etc. (test: `node tools/tests/test_prelude_stubs.js`), clase `Request`, páginas de error con causa legible y "Reintentar" (`app/neterr.h`). Pendiente principal sin cambios: módulos ES, iframes, descargas (reposo/cola/página), app Android. Lista completa en PENDIENTE.md.
+
+## v0.9.7 (Tanda A)
+Ver docs/V0.9.7.md: conversion de video SSE2 + reduccion 2:1, salto de fotogramas atrasados con audio, ayuda de botones del mando, about:diag, modo seguro, respaldo -DPSB_NO_SIMD en el CI. Pendiente de probar en la PS4.
