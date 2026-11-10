@@ -1,0 +1,47 @@
+name: Build Android helper (APK)
+
+# Compila tools/android-helper (ayudante de captchas/cookies para la PS4, en el movil) y deja el APK como artefacto.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/android-helper/**'
+      - '.github/workflows/build-android-helper.yml'
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android SDK (plataforma 34)
+        run: |
+          mkdir -p logs
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" 2>&1 | tail -3
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Pruebas en el PC (logica pura, sin Android)
+        working-directory: tools/android-helper
+        run: |
+          mkdir -p /tmp/t
+          javac -d /tmp/t app/src/main/java/io/github/sacksso/psbhelper/StateBuilder.java app/src/main/java/io/github/sacksso/psbhelper/HttpServerLite.java tests/StateBuilderTest.java
+          java -cp /tmp/t io.github.sacksso.psbhelper.StateBuilderTest
+      - name: Compilar APK debug (firmado con la clave de depuracion, se instala directamente)
+        working-directory: tools/android-helper
+        shell: bash
+        run: gradle --no-daemon assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/logs/gradle.log"
+      - name: Subir APK y log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: psb-helper-apk
+          path: |
+            tools/android-helper/app/build/outputs/apk/debug/*.apk
+            logs/gradle.log
