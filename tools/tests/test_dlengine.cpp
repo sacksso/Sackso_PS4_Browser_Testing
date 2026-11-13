@@ -30,6 +30,7 @@ struct Server {
     std::atomic<int> maxParallel{0}, parallel{0};
     int limitParallel = 0;     // >0: con mas peticiones simultaneas responde 429 (Retry-After 1 s)
     std::atomic<int> rejected{0};
+    std::atomic<int> noisePct{100};  // v0.9.8: modulacion global de la velocidad (100 = normal): simula el WiFi
 };
 static DlFetchFn makeFetch(Server& S) {
     return [&S](const std::string& url, long long start, long long end, DlChunkSink& sink, DlFetchResult& r) {
@@ -57,7 +58,7 @@ static DlFetchFn makeFetch(Server& S) {
             for (long long i = 0; i < k; i++) buf[static_cast<size_t>(i)] = static_cast<char>(pat(p + i));
             if (!sink.write(buf.data(), buf.size())) { r.stage = "cancelado"; return false; }
             S.served += k; sent += k; p += k;
-            if (S.slowUs) std::this_thread::sleep_for(std::chrono::microseconds(S.slowUs));
+            if (S.slowUs) std::this_thread::sleep_for(std::chrono::microseconds(S.slowUs * 100 / std::max(50, S.noisePct.load())));
         }
         return true;
     };
@@ -209,6 +210,33 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(900));
         e.cancel(); e.join();
         CHECK(e.outcome().result == DlResult::CANCELLED);
+    }
+    {
+        printf("[13] v0.9.8: velocidad que escala con las conexiones pero con ruido de +-12 %% (WiFi): debe seguir subiendo, no parar en 3\n");
+        Server S; S.size = 200LL << 20; S.slowUs = 12000; std::string d = fresh();
+        DlParams p = base(S, d, 12); p.rampMs = 500; p.backoffMs = 10;
+        p.log = [](const std::string& l) { printf("   %s\n", l.c_str()); };
+        std::atomic<bool> stop{false};
+        std::thread wifi([&] {   // cada 250 ms cambia la velocidad global entre 88 % y 112 %
+            unsigned x = 12345;
+            while (!stop.load()) { x = x * 1103515245u + 12345u; S.noisePct = 88 + static_cast<int>((x >> 16) % 25); std::this_thread::sleep_for(std::chrono::milliseconds(250)); }
+        });
+        DlEngine e; DlOutcome o = runWait(e, p);
+        stop = true; wifi.join();
+        printf("   maxParalelo=%d conexiones usadas=%d\n", S.maxParallel.load(), o.connsUsed);
+        CHECK(o.result == DlResult::OK);
+        CHECK(S.maxParallel.load() >= 8);
+    }
+    {
+        printf("[14] v0.9.8: hintConns (aprendido) arranca directamente con ese numero y settledConns lo devuelve\n");
+        Server S; S.size = 120LL << 20; S.slowUs = 6000; std::string d = fresh();
+        DlParams p = base(S, d, 8); p.rampMs = 400; p.hintConns = 5;
+        DlEngine e; e.start(p);
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        const int par = S.maxParallel.load();
+        e.cancel(); e.join();
+        printf("   paralelo a los 600 ms: %d\n", par);
+        CHECK(par >= 4);
     }
     printf(fails ? "\n%d FALLOS\n" : "\nTODO OK\n", fails);
     std::string cmd = "rm -rf " + root; (void)!system(cmd.c_str());

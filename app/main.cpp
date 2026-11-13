@@ -16,6 +16,7 @@
 #include <SDL2/SDL.h>
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -113,6 +114,7 @@ struct Config {
     bool vconv = true;        // v0.9.7: convertir a mitad de resolucion los videos mucho mas grandes que su tamano en pantalla (mas fps)
     bool padlog = false;      // v0.9.7: escribir cada boton/cruceta del mando en el log (solo para diagnostico del mapeo)
     bool hints = true;        // v0.9.7: mostrar unos segundos la ayuda de botones abajo al usar el mando
+    int netbuf = 0;           // v0.9.8: KB de buffer de recepcion TCP a pedir al sistema (sysctl, EXPERIMENTAL); 0 = no tocar nada
 };
 static Config g_cfg;
 // v0.9.5: estado del renderer (ver createRenderer(), mas abajo)
@@ -124,7 +126,7 @@ static const char* kRunPath = "/data/psbrowser/running.txt";   // v0.9.7: cuenta
 static bool g_safeMode = false;                                 // v0.9.7: esta sesion arranco en modo seguro
 static bool g_runMarker = false;                                // el marcador running.txt esta puesto (se quita a los 45 s o al salir)
 static uint32_t g_hintUntil = 0;                                // v0.9.7: hasta cuando se muestra la ayuda de botones
-static const char* kVersion = "v0.9.7";
+static const char* kVersion = "v0.9.8";
 static std::vector<std::pair<std::string, std::string>> g_bookmarks;  // (url, titulo)
 static const char* kCfgPath = "/data/psbrowser/config.txt";
 static const char* kBmPath = "/data/psbrowser/bookmarks.txt";
@@ -143,6 +145,7 @@ static void clampCfg() {
     if (g_cfg.gpu < 0 || g_cfg.gpu > 1) g_cfg.gpu = 0;
     if (g_cfg.gscale < 0 || g_cfg.gscale > 2) g_cfg.gscale = 1;
     if (g_cfg.dlconn < 0 || g_cfg.dlconn > 12) g_cfg.dlconn = 8;
+    if (g_cfg.netbuf != 256 && g_cfg.netbuf != 512 && g_cfg.netbuf != 1024 && g_cfg.netbuf != 2048) g_cfg.netbuf = 0;
     g_cookiesEnabled = g_cfg.cookies;
     g_searchEngine = g_cfg.search;
     static const char* kUA[] = {"Mozilla/5.0 (PlayStation 4; psbrowser/0.2)",
@@ -158,7 +161,7 @@ static void configSave() {
     fprintf(f, "mouseSens=%.2f\nmouseAccel=%d\nwheelInvert=%d\nwheelStep=%d\nhome=%s\ndark=%d\nzoom=%d\npageW=%d\nsmooth=%d\nimages=%d\nvdec=%d\nvhalf=%d\nvolume=%d\nvscale=%d\nvpart=%d\nsearch=%d\nua=%d\nuipart=%d\ngpu=%d\ngscale=%d\njs=%d\ndlconn=%d\ncookies=%d\nadblock=%d\nsolver=%s\n",
             g_cfg.mouseSens, g_cfg.mouseAccel ? 1 : 0, g_cfg.wheelInvert ? 1 : 0, g_cfg.wheelStep, g_cfg.home.c_str(), g_cfg.dark ? 1 : 0,
             g_cfg.zoom, g_cfg.pageW, g_cfg.smooth ? 1 : 0, g_cfg.images ? 1 : 0, g_cfg.vdec, g_cfg.vhalf ? 1 : 0, g_cfg.volume, g_cfg.vscale, g_cfg.vpart ? 1 : 0, g_cfg.search, g_cfg.ua, g_cfg.uipart ? 1 : 0, g_cfg.gpu, g_cfg.gscale, g_cfg.js, g_cfg.dlconn, g_cfg.cookies ? 1 : 0, g_cfg.adblock ? 1 : 0, g_cfg.solver.c_str());
-    fprintf(f, "contrast=%d\ncurscale=%d\ncfgv=%d\nvconv=%d\npadlog=%d\nhints=%d\n", g_cfg.contrast ? 1 : 0, g_cfg.curscale, 2, g_cfg.vconv ? 1 : 0, g_cfg.padlog ? 1 : 0, g_cfg.hints ? 1 : 0);
+    fprintf(f, "contrast=%d\ncurscale=%d\ncfgv=%d\nvconv=%d\npadlog=%d\nhints=%d\nnetbuf=%d\n", g_cfg.contrast ? 1 : 0, g_cfg.curscale, 2, g_cfg.vconv ? 1 : 0, g_cfg.padlog ? 1 : 0, g_cfg.hints ? 1 : 0, g_cfg.netbuf);
     fclose(f);
 }
 static void configLoad() {
@@ -202,6 +205,7 @@ static void configLoad() {
         else if (k == "vconv") g_cfg.vconv = v == "1";
         else if (k == "padlog") g_cfg.padlog = v == "1";
         else if (k == "hints") g_cfg.hints = v == "1";
+        else if (k == "netbuf") g_cfg.netbuf = atoi(v.c_str());
     }
     fclose(f);
     if (g_cfg.cfgv < 2) { g_cfg.vscale = 3; g_cfg.cfgv = 2; psb_log("[cfg] migracion v0.9.3: vscale=3 (1280x720, mas fps en video)"); }
@@ -568,6 +572,7 @@ static std::string genSettings() {
         "<p>Reducir a la mitad los videos grandes cuando se ven a 720p/540p (mas fps): <a href=\"psb:vconv\">[ " + std::string(g_cfg.vconv ? "si" : "no") + " ]</a></p>"
         "<p>Ayuda de botones del mando (unos segundos abajo): <a href=\"psb:hints\">[ " + std::string(g_cfg.hints ? "si" : "no") + " ]</a></p>"
         "<p>Registrar cada boton del mando en el log (solo diagnostico): <a href=\"psb:padlog\">[ " + std::string(g_cfg.padlog ? "si" : "no") + " ]</a></p>"
+        "<p>Buffer de recepcion TCP pedido al sistema (EXPERIMENTAL, se restaura al salir; si el sistema no lo permite solo queda anotado en el log): <a href=\"psb:netbuf\">[ " + std::string(g_cfg.netbuf > 0 ? std::to_string(g_cfg.netbuf) + " KB" : "no tocar") + " ]</a></p>"
         "<p><a href=\"about:diag\">[ Diagnostico: version, motor, video, red y ultimas lineas del log ]</a></p>";
     const size_t e = out.rfind("</body>");
     out.insert(e == std::string::npos ? out.size() : e, extra + extra2);
@@ -756,6 +761,84 @@ static std::string genBench() {
     h += "<p>Devuelve /data/psbrowser/log.txt (lineas [bench]) para decidir la mejora. <a href=\"about:settings\">Configuracion</a></p></body></html>";
     return h;
 }
+// v0.9.8: buffers TCP del sistema. Cada conexion de la PS4 parece limitada por su ventana de recepcion (en tus pruebas la velocidad crece casi
+// lineal con el numero de conexiones: ~0,55 MB/s por conexion con HTTP plano). Aqui se LEEN los parametros del sistema (siempre, para el log y
+// about:diag) y, solo si el usuario activa "netbuf", se intenta SUBIR recvspace/recvbuf_max; se restauran al salir. Si el sistema no deja escribir,
+// no pasa nada: queda anotado. Se desactiva compilando con -DPSB_NO_NETTUNE (el CI lo hace solo si el build falla).
+#ifndef PSB_NO_NETTUNE
+extern "C" int sysctlbyname(const char* name, void* oldp, size_t* oldlenp, const void* newp, size_t newlen);   // libkernel
+#endif
+static std::vector<std::string> g_netInfo;                        // lineas para about:diag
+static std::vector<std::pair<std::string, long long>> g_netSaved; // valores originales modificados (para restaurar)
+static std::vector<size_t> g_netSavedSz;
+static bool sysctlGetNum(const char* name, long long& v, size_t& sz, int& err) {
+#ifndef PSB_NO_NETTUNE
+    unsigned char b[16] = {0};
+    size_t len = sizeof(b);
+    errno = 0;
+    if (sysctlbyname(name, b, &len, nullptr, 0) != 0) { err = errno; return false; }
+    sz = len;
+    if (len == 4) { int x; memcpy(&x, b, 4); v = x; return true; }
+    if (len == 8) { long long x; memcpy(&x, b, 8); v = x; return true; }
+    err = -1;
+    return false;
+#else
+    (void)name; (void)v; (void)sz; err = -2;
+    return false;
+#endif
+}
+static bool sysctlSetNum(const char* name, long long v, size_t sz) {
+#ifndef PSB_NO_NETTUNE
+    if (sz == 4) { const int x = static_cast<int>(v); return sysctlbyname(name, nullptr, nullptr, &x, 4) == 0; }
+    if (sz == 8) { const long long x = v; return sysctlbyname(name, nullptr, nullptr, &x, 8) == 0; }
+#else
+    (void)name; (void)v; (void)sz;
+#endif
+    return false;
+}
+static void netTuneProbe() {
+    static const char* names[] = {"net.inet.tcp.recvspace", "net.inet.tcp.sendspace", "net.inet.tcp.recvbuf_auto", "net.inet.tcp.recvbuf_inc",
+                                  "net.inet.tcp.recvbuf_max", "net.inet.tcp.sendbuf_auto", "net.inet.tcp.sendbuf_max", "net.inet.tcp.rfc1323",
+                                  "net.inet.tcp.sack.enable", "net.inet.tcp.delayed_ack", "net.inet.tcp.mssdflt", "kern.ipc.maxsockbuf"};
+    g_netInfo.clear();
+    for (const char* n : names) {
+        long long v = 0; size_t sz = 0; int err = 0;
+        char b[160];
+        if (sysctlGetNum(n, v, sz, err)) snprintf(b, sizeof(b), "%s = %lld (%zu bytes)", n, v, sz);
+        else snprintf(b, sizeof(b), "%s: no disponible (errno %d)", n, err);
+        g_netInfo.push_back(b);
+        psb_log("[nettune] %s", b);
+    }
+}
+static void netTuneRestore() {
+    for (size_t i = 0; i < g_netSaved.size(); i++) {
+        const bool ok = sysctlSetNum(g_netSaved[i].first.c_str(), g_netSaved[i].second, g_netSavedSz[i]);
+        psb_log("[nettune] restaurar %s = %lld: %s", g_netSaved[i].first.c_str(), g_netSaved[i].second, ok ? "ok" : "fallo");
+    }
+    g_netSaved.clear(); g_netSavedSz.clear();
+}
+static void netTuneApply() {
+    netTuneRestore();   // siempre se parte de los valores originales
+    if (g_cfg.netbuf <= 0) { netTuneProbe(); return; }
+    netTuneProbe();     // valores originales (para el log)
+    const long long want = static_cast<long long>(g_cfg.netbuf) * 1024;
+    static const char* targets[] = {"net.inet.tcp.recvspace", "net.inet.tcp.recvbuf_max", "kern.ipc.maxsockbuf"};
+    for (const char* n : targets) {
+        long long v = 0; size_t sz = 0; int err = 0;
+        if (!sysctlGetNum(n, v, sz, err)) { psb_log("[nettune] %s: no se puede leer (errno %d): se omite", n, err); g_netInfo.push_back(std::string("ajuste ") + n + ": no se puede leer"); continue; }
+        if (v >= want) { psb_log("[nettune] %s ya vale %lld (>= %lld): no se toca", n, v, want); continue; }
+        if (sysctlSetNum(n, want, sz)) {
+            long long chk = 0; size_t s2 = 0; int e2 = 0;
+            sysctlGetNum(n, chk, s2, e2);
+            g_netSaved.push_back({n, v}); g_netSavedSz.push_back(sz);
+            psb_log("[nettune] %s: %lld -> %lld (leido despues: %lld)", n, v, want, chk);
+            g_netInfo.push_back(std::string("AJUSTADO ") + n + ": " + std::to_string(v) + " -> " + std::to_string(chk));
+        } else {
+            psb_log("[nettune] %s: el sistema NO permite escribir (errno %d)", n, errno);
+            g_netInfo.push_back(std::string("el sistema no permite escribir ") + n);
+        }
+    }
+}
 static const char* vscaleLabelDiag(int v) { return v == 1 ? "1:1" : (v == 2 ? "x2" : (v == 3 ? "720p" : (v == 4 ? "540p" : "pantalla"))); }
 // v0.9.7: ultimas lineas del log (about:diag). Lee solo el final del archivo.
 static std::vector<std::string> readLogTail(size_t maxBytes, size_t maxLines) {
@@ -799,6 +882,9 @@ static std::string genDiag() {
         snprintf(b, sizeof(b), "%dx%d | %.1f fps mostrados (el video declara %d) | velocidad %.2fx | conversion %.1f ms%s | descartados %lu (con audio: %lu)", vi.vw, vi.vh, vi.fps, vi.srcFps, vi.speed, vi.convMs, vi.decim ? " (a mitad de resolucion)" : "", vi.dropped, vi.catchDropped);
         h += std::string("<li>Video abierto: ") + htmlEscape(b) + "</li>";
     }
+    h += "</ul><h2>Red</h2><ul>";
+    h += std::string("<li>Buffer TCP pedido al sistema (Ajustes): ") + (g_cfg.netbuf > 0 ? std::to_string(g_cfg.netbuf) + " KB" : std::string("no (no se toca nada)")) + " | conexiones paralelas maximas: " + std::to_string(g_cfg.dlconn) + "</li>";
+    for (const std::string& l : g_netInfo) h += "<li>" + htmlEscape(l) + "</li>";
     h += "</ul><h2>Ultimas lineas del log</h2><ul>";
     const std::vector<std::string> tail = readLogTail(12000, 40);
     if (tail.empty()) h += "<li>(no se pudo leer /data/psbrowser/log.txt)</li>";
@@ -1394,6 +1480,49 @@ static void dlWaitEngine(DlEngine& eng, std::vector<double>* samples) {
     }
     eng.join();
 }
+// v0.9.8: conexiones que funcionaron en la ultima descarga larga de cada servidor (la proxima arranca directamente con ellas).
+static const char* kDlHostsPath = "/data/psbrowser/dlhosts.txt";
+static std::string dlHostOf(const std::string& url) {
+    std::string sch, host, pth;
+    return url_split(url, sch, host, pth) ? host : std::string();
+}
+static int dlHostLoad(const std::string& host) {
+    if (host.empty()) return 0;
+    FILE* f = fopen(kDlHostsPath, "r");
+    if (!f) return 0;
+    char line[300];
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        std::string l = line;
+        while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+        const size_t t = l.find('\t');
+        if (t == std::string::npos || l.substr(0, t) != host) continue;
+        found = atoi(l.c_str() + t + 1);
+    }
+    fclose(f);
+    return found >= 1 && found <= 12 ? found : 0;
+}
+static void dlHostSave(const std::string& host, int n) {
+    if (host.empty() || n < 1 || n > 12) return;
+    std::vector<std::pair<std::string, int>> all;
+    if (FILE* f = fopen(kDlHostsPath, "r")) {
+        char line[300];
+        while (fgets(line, sizeof(line), f)) {
+            std::string l = line;
+            while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+            const size_t t = l.find('\t');
+            if (t == std::string::npos || l.substr(0, t) == host) continue;
+            all.push_back({l.substr(0, t), atoi(l.c_str() + t + 1)});
+        }
+        fclose(f);
+    }
+    all.push_back({host, n});
+    if (all.size() > 80) all.erase(all.begin(), all.end() - 80);
+    if (FILE* f = fopen(kDlHostsPath, "w")) {
+        for (const auto& e : all) fprintf(f, "%s\t%d\n", e.first.c_str(), e.second);
+        fclose(f);
+    }
+}
 static bool runDownloadEngine(const std::string& url, std::string& err) {
     imgw_cancel();
     imgw_pause(true);  // el hilo de imagenes no debe competir por la red
@@ -1416,6 +1545,11 @@ static bool runDownloadEngine(const std::string& url, std::string& err) {
     p.dir = kDlDir;
     p.knownTotal = same ? g_pend.len : -1;
     p.conns = g_cfg.dlconn;
+    const std::string dlHost = dlHostOf(url);
+    {
+        const int hint = dlHostLoad(dlHost);
+        if (hint > 0 && p.conns > 1) { p.hintConns = std::min(hint, p.conns); psb_log("[dl] %s: la ultima vez funcionaron %d conexion(es): se arranca con ellas", dlHost.c_str(), p.hintConns); }
+    }
     p.referer = same ? g_pendRef : std::string();
     p.fetch = makeNetFetch(p.referer);
     p.accept = [same](const DlFetchResult& r) {  // se esperaba un archivo y llega una pagina web: enlace temporal, sesion caducada, captcha...
@@ -1445,6 +1579,7 @@ static bool runDownloadEngine(const std::string& url, std::string& err) {
     g_loading = false;
     imgw_pause(false);
     g_dirty = true;
+    if (o.settledConns > 0) { dlHostSave(dlHost, o.settledConns); psb_log("[dl] aprendido: %s -> %d conexion(es)", dlHost.c_str(), o.settledConns); }
     if (o.bytes > 0)
         psb_log("[dl] motor: %.1f s, %.2f MB/s de media, %d conexion(es), %d reintento(s)%s%s", (t1 - t0) / 1000.0, o.bytes * 1000.0 / std::max<uint32_t>(1, t1 - t0) / 1048576.0,
                 o.connsUsed, pr.retryCount, o.chunked ? ", por trozos" : ", flujo unico", pr.resumed ? ", reanudada" : "");
@@ -1586,13 +1721,13 @@ static void runDlBench(int which) {
     g_dlp = DlProgress();
     g_dlp.active = true;
     g_loading = true;
-    toast("Midiendo descargas (~40 s). Cancelar: boton O");
+    toast("Midiendo descargas (~55 s). Cancelar: boton O");
     present();
     dlBenchLine("Servidor: " + url);
-    const int ns[3] = {1, 2, 4};
-    double avgs[3] = {0, 0, 0};
+    const int ns[4] = {1, 2, 4, 8};
+    double avgs[4] = {0, 0, 0, 0};
     bool anyRange = true, okAll = true;
-    for (int i = 0; i < 3 && okAll; i++) {
+    for (int i = 0; i < 4 && okAll; i++) {
         bool ranged = true;
         okAll = benchNet(url, ns[i], 8000, avgs[i], ranged);
         if (i == 0 && okAll && !ranged) { anyRange = false; break; }  // sin Range no tiene sentido probar mas conexiones
@@ -1605,12 +1740,17 @@ static void runDlBench(int which) {
         for (double a : avgs) best = std::max(best, a);
         if (best > 0 && anyRange) {
             int rec = 1;
-            for (int i = 0; i < 3; i++) if (avgs[i] >= best * 0.9) { rec = ns[i]; break; }
+            for (int i = 0; i < 4; i++) if (avgs[i] >= best * 0.9) { rec = ns[i]; break; }
             if (avgs[0] > 0 && best < avgs[0] * 1.15) rec = 1;  // menos de un 15 % de mejora: no compensa
             g_dlBenchRec = rec;
             char b[260];
             snprintf(b, sizeof(b), "Recomendacion: %d conexion(es) para descargas por ese servidor.", rec);
             dlBenchLine(b);
+            if (avgs[0] > 0 && avgs[1] > avgs[0] * 1.6 && avgs[2] > avgs[1] * 1.5) {
+                char c[300];
+                snprintf(c, sizeof(c), "Lectura: la velocidad crece casi en linea con las conexiones (1 conexion = %.2f MB/s). El limite esta en CADA conexion (ventana TCP / latencia), no en tu linea: mas conexiones compensan donde el servidor las admita. Prueba tambien Ajustes -> Buffer TCP (experimental).", avgs[0]);
+                dlBenchLine(c);
+            }
             if (seq > 0 && best > seq * 0.9) dlBenchLine("Aviso: el disco (escritura secuencial) rinde parecido a la red: puede ser el limite real a velocidades altas.");
             if (itl > 0 && seq > 0 && itl < seq * 0.6) dlBenchLine("Aviso: con varios flujos intercalados el disco rinde bastante menos: las conexiones extra pueden no compensar en HDD.");
         } else if (!anyRange) {
@@ -2045,6 +2185,7 @@ static bool handleAction(Browser& b, const std::string& a) {
     else if (a == "vhalf") g_cfg.vhalf = !g_cfg.vhalf;
     else if (a == "vconv") g_cfg.vconv = !g_cfg.vconv;
     else if (a == "hints") g_cfg.hints = !g_cfg.hints;
+    else if (a == "netbuf") { static const int seq[] = {0, 256, 512, 1024, 2048}; int i = 0; for (int k = 0; k < 5; k++) if (seq[k] == g_cfg.netbuf) i = k; g_cfg.netbuf = seq[(i + 1) % 5]; netTuneApply(); toast(g_cfg.netbuf > 0 ? "Buffer TCP: se intento subir a " + std::to_string(g_cfg.netbuf) + " KB (mira about:diag). Mide con about:dlbench" : std::string("Buffer TCP: valores originales restaurados")); }
     else if (a == "padlog") g_cfg.padlog = !g_cfg.padlog;
     else if (a == "search") g_cfg.search = (g_cfg.search + 1) % 5;
     else if (a == "ua") g_cfg.ua = (g_cfg.ua + 1) % 5;
@@ -2970,6 +3111,7 @@ static void quitClick() {
 // Salida: cierra el video y termina el proceso con _exit (evita destructores estaticos con hilos vivos). Un hilo vigilante fuerza la salida
 // si algo se atasca al cerrar (p. ej. el reproductor).
 static void hardExit() {
+    netTuneRestore();
     if (g_runMarker) { g_runMarker = false; remove(kRunPath); }  // salida normal: no cuenta como cierre inesperado
     cookies_save();
     psb_log("[quit] saliendo");
@@ -3823,7 +3965,7 @@ static SDL_Renderer* createRenderer(SDL_Window* win) {
 }
 int main(int, char**) {
     openLog();
-    psb_log("== psbrowser %s (DOM+CSS+JS+Canvas2D+GPU probe+VCONV) ==", kVersion);
+    psb_log("== psbrowser %s (DOM+CSS+JS+Canvas2D+GPU probe+VCONV+NET) ==", kVersion);
     psb_log("[jsx] motor JS: %s | js=%d uipart=%d", jsx_has_engine() ? "QuickJS" : "no incluido", g_cfg.js, g_cfg.uipart ? 1 : 0);
     configLoad();
     cookies_load();
@@ -3843,6 +3985,7 @@ int main(int, char**) {
         } else n++;
         if (FILE* f = fopen(kRunPath, "w")) { fprintf(f, "%d\n", n); fclose(f); g_runMarker = true; }
     }
+    netTuneApply();   // v0.9.8: lee los parametros TCP del sistema y, si netbuf > 0, intenta subir el buffer de recepcion
     dlListLoad();
     g_th = pickTheme();
     if (!te_init()) { psb_log("te_init FALLO (fuentes)"); return 1; }

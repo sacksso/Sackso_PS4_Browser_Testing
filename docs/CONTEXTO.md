@@ -474,3 +474,6 @@ Sin probar en PS4. Prelude con stubs de WebSocket/EventSource/indexedDB/Intl/Fil
 
 ## v0.9.7 (Tanda A)
 Ver docs/V0.9.7.md: conversion de video SSE2 + reduccion 2:1, salto de fotogramas atrasados con audio, ayuda de botones del mando, about:diag, modo seguro, respaldo -DPSB_NO_SIMD en el CI. Pendiente de probar en la PS4.
+
+## v0.9.8 (Red: velocidad y estabilidad de descargas)
+Ver docs/V0.9.8.md: rampa de conexiones nueva (mide bytes recibidos, paciencia, reprueba cada 45 s), memoria de conexiones por servidor (dlhosts.txt), lectura parada = 25 s, sondeo/ajuste experimental de buffers TCP (sysctl, netbuf), dlbench con 1/2/4/8 conexiones, respaldo CI -DPSB_NO_NETTUNE. Pendiente de probar en la PS4.

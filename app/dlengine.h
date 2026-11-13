@@ -44,6 +44,7 @@ struct DlParams {
     bool discard = false;            // medidor: no escribe, repite trozos hasta benchMs
     int benchMs = 0;
     int rampMs = 4000;               // ventana de medida para subir/bajar conexiones (las pruebas la acortan)
+    int hintConns = 0;               // v0.9.8: conexiones que funcionaron en una descarga anterior de este servidor (0 = sin dato): se arranca con ellas
     DlFetchFn fetch;
     std::function<bool(const DlFetchResult&)> accept;              // false = llego una pagina web en vez del archivo
     std::function<std::string(const DlFetchResult&)> pickPath;     // ruta final de una descarga NUEVA (la unica funcion que decide el nombre)
@@ -65,6 +66,7 @@ struct DlOutcome {
     long long bytes = 0;
     bool kept = false;   // quedo un .part reanudable
     int connsUsed = 1;
+    int settledConns = 0;  // v0.9.8: conexiones permitidas al terminar, solo si la descarga duro >= 20 s con varias (para recordarlas por servidor); 0 = sin dato
     bool chunked = false;  // el servidor admitio Range
 };
 

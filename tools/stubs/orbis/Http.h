@@ -7,7 +7,7 @@ enum { ORBIS_METHOD_GET = 0 };
 extern "C" {
 int sceHttpInit(int, int, int); int sceHttpTerm(int);
 int sceHttpCreateTemplate(int, const char*, int, int);
-int sceHttpSetResolveTimeOut(int, uint32_t); int sceHttpSetConnectTimeOut(int, uint32_t);
+int sceHttpSetResolveTimeOut(int, uint32_t); int sceHttpSetConnectTimeOut(int, uint32_t); int sceHttpSetRecvTimeOut(int, uint32_t);
 void sceHttpSetResponseHeaderMaxSize();
 int sceHttpsSetSslCallback(int, int (*)(int, unsigned, void* const*, int, void*), void*);
 int sceHttpCreateConnectionWithURL(int, const char*, int);

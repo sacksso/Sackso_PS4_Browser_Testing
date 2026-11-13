@@ -143,6 +143,8 @@ struct DlEngine::Impl {
     Meta rm;
     std::string curUrl, finalUrl, finalPath, partPath, metaPath, name, contentType;
     std::atomic<long long> done{0};
+    std::atomic<long long> wire{0};   // v0.9.8: bytes recibidos de la red (se cuentan al llegar, no al vaciar el buffer de 2 MB): base de la rampa
+    int settled = 0;
     std::atomic<bool> cancel{false}, fatal{false}, w0done{false}, fin{false};
     std::atomic<int> active{0}, retryCount{0};
     std::atomic<int> allowed{1}, alive{0}, ceiling{1}, inflight{0};   // conexiones permitidas ahora / hilos vivos / techo (baja ante errores)
@@ -193,6 +195,7 @@ struct DlEngine::Impl {
                 if (E->deadlinePassed()) { byDeadline = true; return false; }
                 return true;
             }
+            E->wire += static_cast<long long>(n);
             buf.append(static_cast<const char*>(d), n);
             return buf.size() < kFlushBuf || flush();
         }
@@ -430,7 +433,7 @@ struct DlEngine::Impl {
         st.clear(); nChunks = 0; nextIdx = 0; total = -1; mode = M_UNKNOWN;
         headersReady = false; writerOpen = false; completedOpen = false; firstClaimed = false;
         resumeCand = false; resumed = false; resumedFrom = 0;
-        done = 0;
+        done = 0; wire = 0;
         curUrl.clear();
         restartScratch = false;
         w0done = false;
@@ -441,6 +444,7 @@ struct DlEngine::Impl {
         o.finalUrl = finalUrl.empty() ? P.url : finalUrl;
         o.contentType = contentType;
         o.connsUsed = connsUsed;
+        o.settledConns = settled;
         o.chunked = mode == M_CHUNKED;
         o.bytes = done.load();
         o.stage = fstage; o.status = fstatus; o.sceError = fsce;
@@ -547,36 +551,63 @@ struct DlEngine::Impl {
                 }
             }
             ceiling = n;
-            allowed = P.discard ? n : std::min(n, 2);   // el medidor usa un numero fijo; las descargas empiezan con 2 y suben
+            {   // v0.9.8: arranque. El medidor usa un numero fijo. Las descargas empiezan con el numero que funciono la ultima vez con este servidor
+                // (hintConns) o, si no hay dato, con 2 (3 si el archivo pesa >= 256 MB, donde la rampa tarda mucho en compensar).
+                int startA = 2;
+                { std::lock_guard<std::mutex> lk(mu); if (total >= (256LL << 20)) startA = 3; }
+                if (P.hintConns > 0) startA = P.hintConns;
+                allowed = P.discard ? n : std::max(1, std::min(n, startA));
+            }
             for (int i = 1; i < n; i++) { ++alive; workers.emplace_back([this, i] { workerMain(false, i); }); }
             connsUsed = n;
-            // supervision: subida gradual mientras la velocidad total crezca (ventanas de 4 s)
+            // supervision (v0.9.8). Se mide la velocidad real recibida (wire) en ventanas de rampMs. Se sube mientras cada paso gane >= 6 %; ante una
+            // ventana sin ganancia se espera otra (el WiFi fluctua +-15 %: parar a la primera dejaba la descarga en 3 conexiones) y solo tras dos
+            // seguidas se mantiene. Despues, cada 45 s se vuelve a probar con una conexion mas (si el servidor no ha puesto un limite).
             {
-                long long lastT = nowMs(), lastDone = done.load();
+                const long long tStart = nowMs();
+                long long lastT = tStart, lastWire = wire.load(), lastProbe = tStart;
                 double prev = -1;
+                int noGain = 0;
                 while (alive.load() > 0 && !cancel.load() && !fatal.load()) {
                     sleepMs(200);
-                    if (P.discard || rampStopped.load() || n <= 1) continue;
+                    if (P.discard || n <= 1) continue;
                     const long long t = nowMs();
                     if (t - lastT < P.rampMs) continue;
-                    const long long d = done.load();
-                    const double sp = static_cast<double>(d - lastDone) * 1000.0 / static_cast<double>(t - lastT);
-                    lastT = t; lastDone = d;
+                    const long long wv = wire.load();
+                    const double sp = static_cast<double>(wv - lastWire) * 1000.0 / static_cast<double>(t - lastT);
+                    lastT = t; lastWire = wv;
                     const int a = allowed.load();
                     if (!anyPending()) { rampStopped = true; continue; }   // ya no quedan trozos que repartir
-                    if (prev < 0 || sp > prev * 1.12) {
-                        if (a < ceiling.load()) {
-                            const int na = std::min(ceiling.load(), a + (a >= 3 ? 2 : 1));
+                    const int ceil = ceiling.load();
+                    if (rampStopped.load()) {
+                        // en espera: nueva prueba periodica hacia arriba (no si el servidor puso un limite hace poco o ya estamos en el techo)
+                        const long long reprobeMs = std::max<long long>(45000, 8LL * P.rampMs);
+                        if (t - lastProbe >= reprobeMs && a < ceil && t - lastDownAt.load() > 60000) {
+                            lastProbe = t; prev = sp; noGain = 0; rampStopped = false;
+                            allowed = a + 1;
+                            log("[dleng] prueba periodica: " + std::to_string(static_cast<int>(sp / 1024)) + " KB/s con " + std::to_string(a) + " conexion(es): se prueba con " + std::to_string(a + 1));
+                        }
+                        continue;
+                    }
+                    if (prev < 0 || sp > prev * 1.06) {
+                        noGain = 0;
+                        if (a < ceil) {
+                            const int na = std::min(ceil, a + (a >= 3 ? 2 : 1));
                             allowed = na;
                             log("[dleng] velocidad total " + std::to_string(static_cast<int>(sp / 1024)) + " KB/s con " + std::to_string(a) + " conexion(es): se sube a " + std::to_string(na));
-                        } else rampStopped = true;
+                        } else { rampStopped = true; lastProbe = t; }
                         prev = sp;
-                    } else {
-                        if (sp < prev * 0.95 && a > 1) { allowed = a - 1; log("[dleng] mas conexiones no aceleran (" + std::to_string(static_cast<int>(sp / 1024)) + " KB/s): se vuelve a " + std::to_string(a - 1)); }
-                        else log("[dleng] la velocidad ya no sube con mas conexiones (" + std::to_string(static_cast<int>(sp / 1024)) + " KB/s con " + std::to_string(a) + "): se mantiene");
-                        rampStopped = true;
-                    }
+                    } else if (sp < prev * 0.90 && a > 1) {
+                        allowed = a - 1;
+                        log("[dleng] mas conexiones no aceleran (" + std::to_string(static_cast<int>(sp / 1024)) + " KB/s, antes " + std::to_string(static_cast<int>(prev / 1024)) + "): se vuelve a " + std::to_string(a - 1));
+                        rampStopped = true; lastProbe = t;
+                    } else if (++noGain >= 2) {
+                        log("[dleng] la velocidad ya no sube con mas conexiones (" + std::to_string(static_cast<int>(sp / 1024)) + " KB/s con " + std::to_string(a) + "): se mantiene (se vuelve a probar en 45 s)");
+                        rampStopped = true; lastProbe = t;
+                    }   // si no: una ventana sin ganancia, se mide otra vez con las mismas conexiones
                 }
+                // lo aprendido: solo si la descarga duro lo bastante y llego a usar varias conexiones
+                if (!cancel.load() && !fatal.load() && nowMs() - tStart >= 20000 && n > 1) settled = allowed.load();
             }
             allowed = std::max(allowed.load(), 1);
             for (auto& t : workers) t.join();

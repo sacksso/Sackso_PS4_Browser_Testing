@@ -171,6 +171,11 @@ static bool singleGet(const std::string& url, const HttpPost* post, HttpResult& 
         sceHttpSetResolveTimeOut(tpl, static_cast<uint32_t>(ctoMs) * 1000u);
         sceHttpSetConnectTimeOut(tpl, static_cast<uint32_t>(ctoMs) * 1000u);
     }
+#ifndef PSB_NO_NETTUNE
+    // v0.9.8: en descargas, una lectura sin recibir nada se corta a los 25 s (antes valia el limite por defecto de libSceHttp, mucho mayor) y el
+    // motor reintenta desde el ultimo byte recibido: un corte del WiFi ya no deja una conexion colgada minutos.
+    if (sink) sceHttpSetRecvTimeOut(tpl, 25u * 1000u * 1000u);
+#endif
     sceHttpsSetSslCallback(tpl, sslCallback, nullptr);
     // Hipotesis de la prueba 2: las paginas /wiki/ de Wikipedia mandan cabeceras de respuesta grandes y libSceHttp tiene un
     // limite por defecto pequeno (www.wikipedia.org y action=raw, con menos cabeceras, si funcionan). La cabecera de OpenOrbis
