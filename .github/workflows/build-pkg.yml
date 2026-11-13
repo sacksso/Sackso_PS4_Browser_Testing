@@ -159,12 +159,12 @@ jobs:
           make EXTRAFLAGS="$flags" 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
-            # v0.9.7: primero se reintenta con la conversion de video escalar (-DPSB_NO_SIMD) por si el toolchain no acepta <emmintrin.h>
-            echo "::warning::El build fallo: se reintenta sin SSE2 en la conversion de video (-DPSB_NO_SIMD). Mira logs/build_simd_failed.log"
+            # v0.9.7/v0.9.8: primero se reintenta con la conversion de video escalar (-DPSB_NO_SIMD) y sin el ajuste de red (-DPSB_NO_NETTUNE: sysctl y RecvTimeOut) por si el toolchain no los acepta
+            echo "::warning::El build fallo: se reintenta sin SSE2 y sin ajuste de red (-DPSB_NO_SIMD -DPSB_NO_NETTUNE). Mira logs/build_simd_failed.log"
             cp "$GITHUB_WORKSPACE/logs/build.log" "$GITHUB_WORKSPACE/logs/build_simd_failed.log"
-            echo "el build con SSE2 fallo (rc=$rc); si el PKG se genero es con la conversion de video escalar (mas lenta)" > "$GITHUB_WORKSPACE/logs/simd_fallback.txt"
+            echo "el build con SSE2/ajuste de red fallo (rc=$rc); si el PKG se genero es con la conversion de video escalar y SIN sysctl/RecvTimeOut (mira build_simd_failed.log para saber cual fallo)" > "$GITHUB_WORKSPACE/logs/simd_fallback.txt"
             rm -rf "$work/$proj/x64"
-            extra="$extra -DPSB_NO_SIMD"
+            extra="$extra -DPSB_NO_SIMD -DPSB_NO_NETTUNE"
             if [ "$js_ok" = "1" ]; then flags="$extra -I$proj"; else flags="$extra -DPSB_NO_JS"; fi
             echo "EXTRAFLAGS='$flags'" | tee "$GITHUB_WORKSPACE/logs/flags.txt"
             make EXTRAFLAGS="$flags" 2>&1 | tee "$GITHUB_WORKSPACE/logs/build.log"
